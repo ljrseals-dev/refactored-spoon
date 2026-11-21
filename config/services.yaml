@@ -1,0 +1,64 @@
+# Modular service registry.
+# Leave existing links intact. To add a new legal source, append a new block.
+# Only services with enabled: true will run.
+
+services:
+  project_gutenberg:
+    enabled: true
+    type: bulk_catalog
+    description: "Project Gutenberg public-domain books"
+    base_url: "https://www.gutenberg.org"
+    # Existing catalog / mirror links left intact – edit only if needed
+    catalog_url: "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
+    mirrors:
+      - "https://www.gutenberg.org"
+      - "https://gutenberg.pglaf.org"
+    license_filter: ["public domain", "Public domain", "CC0"]
+    max_books: 500          # safety limit for first run
+    output_dir: "data/gutenberg"
+    formats: ["epub", "txt"]
+    parser: "epub_txt"
+
+  wikipedia_dumps:
+    enabled: true
+    type: dump
+    description: "Wikipedia / Wikimedia dumps (CC BY-SA)"
+    # Official dump index – leave as-is
+    dump_index: "https://dumps.wikimedia.org/backup-index.html"
+    languages:
+      - en
+      # - es
+      # - fr
+    dump_type: "pages-articles"   # or pages-articles-multistream
+    output_dir: "data/wikipedia"
+    parser: "wiki_xml"
+
+  internet_archive_pd:
+    enabled: true
+    type: ia_search
+    description: "Internet Archive public-domain / CC0 items"
+    # Advanced search – keep existing query structure
+    base_url: "https://archive.org"
+    query: 'collection:opensource AND (publicdomain OR mediatype:texts) AND licenseurl:(*cc0* OR *publicdomain*)'
+    max_items: 200
+    output_dir: "data/ia"
+    formats: ["pdf", "epub", "txt"]
+    parser: "generic"
+
+  # Example of adding another legal service later:
+  # openstax:
+  #   enabled: false
+  #   type: html
+  #   description: "OpenStax open textbooks (CC BY)"
+  #   base_url: "https://openstax.org"
+  #   output_dir: "data/openstax"
+  #   parser: "html"
+
+# Global processing defaults
+processing:
+  chunk_size: 1200
+  chunk_overlap: 150
+  min_chunk_chars: 200
+  languages: ["en"]          # filter after language detection
+  output_chunks_dir: "data/chunks"
+  index_db: "data/index.db"

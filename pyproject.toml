@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "offline-doc-mcp"
+version = "0.1.0"
+description = "Offline-first document corpus + MCP server with strict mode isolation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Offline Doc Team"}]
+dependencies = [
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "pypdf>=4.0",
+    "ebooklib>=0.18",
+    "python-docx>=1.1",
+    "markdown>=3.5",
+    "rank-bm25>=0.2.2",
+    "sqlite-utils>=3.36",
+    "click>=8.1",
+    "rich>=13.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+embeddings = ["fastembed>=0.3"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+offline-doc = "offline_doc_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
