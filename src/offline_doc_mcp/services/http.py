@@ -32,11 +32,11 @@ class RobotsAwareHTTP:
         max_retries: int = 3,
         client: httpx.Client | None = None,
     ):
-        if not user_agent or any(ch in user_agent for ch in ("\\r", "\\n")):
+        if not user_agent or any(ch in user_agent for ch in ("\r", "\n")):
             raise ValueError("A descriptive, single-line User-Agent is required")
         if timeout <= 0 or min_delay < 0 or not 0 <= max_retries <= 5:
             raise ValueError("Invalid HTTP timeout, delay, or retry count")
-        suffix = f" (contact: {contact})" if contact else ""
+        if contact and any(ch in contact for ch in ("\r", "\n")):\n            raise ValueError("Crawler contact must be a single line")\n        suffix = f" (contact: {contact})" if contact else ""
         self.user_agent = user_agent + suffix
         self.timeout = timeout
         self.min_delay = min_delay
