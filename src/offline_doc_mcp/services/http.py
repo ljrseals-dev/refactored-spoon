@@ -32,8 +32,7 @@ class RobotsAwareHTTP:
         max_retries: int = 3,
         client: httpx.Client | None = None,
     ):
-        if not user_agent or any(ch in user_agent for ch in "\r
-"):
+        if not user_agent or any(ch in user_agent for ch in ("\\r", "\\n")):
             raise ValueError("A descriptive, single-line User-Agent is required")
         if timeout <= 0 or min_delay < 0 or not 0 <= max_retries <= 5:
             raise ValueError("Invalid HTTP timeout, delay, or retry count")

@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from ..acquire import DownloadState, ResumableDownloader
 from .http import RobotsAwareHTTP
 
 
@@ -21,6 +22,13 @@ class BaseService(ABC):
             timeout=float(config.get("timeout_seconds", 30)),
             min_delay=float(config.get("request_delay_seconds", 1)),
             max_retries=int(config.get("max_retries", 3)),
+        )
+        self.downloader = ResumableDownloader(
+            self.http,
+            DownloadState(root / "data" / "download-state.sqlite3"),
+            root / config.get("quarantine_dir", "data/quarantine"),
+            retry_max=int(config.get("retry_max", 3)),
+            max_bytes_per_run=config.get("max_bytes_per_run"),
         )
 
     @abstractmethod
