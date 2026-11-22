@@ -103,6 +103,8 @@ class ResumableDownloader:
                  expected_sha256: str | None = None, force: bool = False) -> int:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
+        current = url
+        redirects = 0
         identity = hashlib.sha256(f"{source}\0{url}".encode()).hexdigest()
         doc_id = f"{source[:24]}-{identity[:32]}"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +158,7 @@ class ResumableDownloader:
                     if response.status_code in RETRYABLE:
                         delay = self.http._retry_delay(response.headers.get("retry-after"), attempt)
                         raise _RetryableStatus(response.status_code, delay)
-                    if response.status_code in {401, 403, 404, 410} or response.status_code >= 400:
+                    if response.status_code >= 400:
                         self.state.update(doc_id, state="failed",
                                           attempt_count=attempt + 1,
                                           last_error=f"HTTP {response.status_code}")
@@ -248,6 +250,10 @@ class ResumableDownloader:
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,
                                   last_error=f"retryable HTTP {exc.status}")
                 time.sleep(exc.delay)
+            except httpx.HTTPStatusError:
+                self.state.update(doc_id, state="failed", attempt_count=attempt + 1,
+                                  last_error="permanent HTTP response")
+                raise
             except httpx.HTTPError as exc:
                 if attempt >= self.retry_max:
                     self.state.update(doc_id, state="failed", attempt_count=attempt + 1,
