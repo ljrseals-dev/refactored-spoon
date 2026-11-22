@@ -10,8 +10,6 @@ import csv
 import io
 import json
 import re
-from pathlib import Path
-from urllib.parse import quote
 
 import httpx
 
@@ -63,14 +61,15 @@ class GutenbergService(BaseService):
             for url in candidates:
                 try:
                     size = self.http.download(url, destination, max_bytes=max_bytes)
-                    metadata = destination.with_suffix(".source.txt")
-                    metadata.write_text(
-                        f"title={title}\nsource=Project Gutenberg\n"
-                        f"source_url={url}\nbook_id={ebook_no}\n"
-                        f"rights_scope=public-domain-in-US-only\n"
-                        f"license_notice=Verify copyright status in your jurisdiction\n",
-                        encoding="utf-8",
-                    )
+                    metadata = destination.with_suffix(".source.json")
+                    metadata.write_text(json.dumps({
+                        "title": title,
+                        "source": "Project Gutenberg",
+                        "source_url": url,
+                        "book_id": ebook_no,
+                        "rights_scope": "public-domain-in-US-only",
+                        "license_notice": "Verify copyright status in your jurisdiction",
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
                     count += 1
                     print(f"[{self.name}] downloaded {ebook_no} ({size} bytes)")
                     break

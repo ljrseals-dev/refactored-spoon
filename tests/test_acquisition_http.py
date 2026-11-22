@@ -17,7 +17,7 @@ def test_robots_policy_blocks_disallowed_path_and_allows_permitted_download(tmp_
     def handler(request):
         requests.append(request)
         if request.url.path == "/robots.txt":
-            return httpx.Response(200, text="User-agent: *\\nDisallow: /private\\n")
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
         return httpx.Response(200, content=b"safe document")
 
     client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, client=client_for(handler))
@@ -50,7 +50,7 @@ def test_download_size_limit_and_https_only(tmp_path):
     client = RobotsAwareHTTP(
         "RefactoredSpoonBot/0.2", min_delay=0,
         client=client_for(lambda request: httpx.Response(
-            200, text="User-agent: *\\nAllow: /"
+            200, text="User-agent: *\nAllow: /"
         ) if request.url.path == "/robots.txt" else httpx.Response(200, content=b"12345")),
     )
     try:
