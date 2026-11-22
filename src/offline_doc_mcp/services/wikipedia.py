@@ -55,13 +55,13 @@ class WikipediaService(BaseService):
                 destination = out / f"{safe}.txt"
                 if destination.exists() and not force:
                     continue
-                destination.write_text(
-                    f"{title}\n\n{extract}\n\n"
-                    f"Source: {summary.get('content_urls', {}).get('desktop', {}).get('page', '')}\n"
+                page_url = summary.get("content_urls", {}).get("desktop", {}).get("page", "")
+                content = (
+                    f"{title}\n\n{extract}\n\nSource: {page_url}\n"
                     "License: Creative Commons Attribution-ShareAlike (CC BY-SA); "
-                    "Wikipedia contributors are the authors.\n",
-                    encoding="utf-8",
-                )
+                    "Wikipedia contributors are the authors.\n"
+                ).encode("utf-8")
+                self.downloader.store_content(self.name, page_url or title, destination, content)
                 (destination.with_suffix(".source.json")).write_text(
                     json.dumps({
                         "title": title,

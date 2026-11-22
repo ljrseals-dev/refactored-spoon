@@ -259,6 +259,34 @@ class ResumableDownloader:
                 time.sleep(min(30, 2 ** attempt) * (0.5 + random.random()))
         raise RuntimeError("Download retry budget exhausted")
 
+    def store_content(self, source: str, url: str, destination: Path, content: bytes) -> int:
+        """Atomically persist source-derived text using the download state table."""
+        identity = hashlib.sha256(f"{source}\0{url}".encode()).hexdigest()
+        doc_id = f"{source[:24]}-{identity[:32]}"
+        partial = destination.with_name(doc_id + ".part")
+        digest = hashlib.sha256(content).hexdigest()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        row = self.state.ensure(doc_id=doc_id, source=source, url=url,
+                                partial_path=partial, final_path=destination,
+                                expected_size=len(content), expected_sha256=digest)
+        if row["state"] == "quarantined":
+            raise DownloadValidationError("This source is quarantined; manual review required")
+        if row["state"] == "completed" and destination.exists():
+            if not validate_file(destination, expected_size=len(content), expected_sha256=digest):
+                return destination.stat().st_size
+        with partial.open("wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        issues = validate_file(partial, expected_size=len(content), expected_sha256=digest)
+        if issues:
+            self._quarantine(doc_id, partial, issues)
+            raise DownloadValidationError("; ".join(issues))
+        os.replace(partial, destination)
+        self.state.update(doc_id, state="completed", bytes_done=len(content),
+                          completed_at=utcnow(), last_error=None)
+        return len(content)
+
     def _quarantine(self, doc_id: str, partial: Path, issues: list[str]) -> None:
         target = self.quarantine_dir / doc_id
         target.mkdir(parents=True, exist_ok=True)
