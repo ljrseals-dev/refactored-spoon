@@ -100,7 +100,7 @@ class ResumableDownloader:
 
     def download(self, source: str, url: str, destination: Path, *,
                  max_bytes: int = 25_000_000, expected_size: int | None = None,
-                 expected_sha256: str | None = None) -> int:
+                 expected_sha256: str | None = None, force: bool = False) -> int:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
         identity = hashlib.sha256(f"{source}\0{url}".encode()).hexdigest()
@@ -118,7 +118,9 @@ class ResumableDownloader:
             if not issues:
                 return destination.stat().st_size
         if row["state"] == "failed":
-            self.state.update(doc_id, state="pending", last_error=None)
+            if not force:
+                raise RuntimeError("Download previously failed permanently; use force to retry")
+            self.state.update(doc_id, state="pending", last_error=None, attempt_count=0)
         if destination.exists() and (row["state"] != "completed"):
             destination.unlink()
         partial.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +144,15 @@ class ResumableDownloader:
                 if validator:
                     headers["If-Range"] = validator
             try:
-                with self.http._client.stream("GET", url, headers=headers) as response:
+                with self.http._client.stream("GET", current, headers=headers) as response:
+                    if response.is_redirect:
+                        if redirects >= 5:
+                            raise DownloadValidationError("Too many redirects")
+                        from urllib.parse import urljoin
+                        current = urljoin(current, response.headers.get("location", ""))
+                        self.http._origin(current)  # HTTPS-only validation
+                        redirects += 1
+                        continue
                     if response.status_code in RETRYABLE:
                         delay = self.http._retry_delay(response.headers.get("retry-after"), attempt)
                         raise _RetryableStatus(response.status_code, delay)
@@ -231,8 +241,8 @@ class ResumableDownloader:
                                       last_error=f"HTTP {exc.status}")
                     raise httpx.HTTPStatusError(
                         f"retry budget exhausted: HTTP {exc.status}",
-                        request=httpx.Request("GET", url),
-                        response=httpx.Response(exc.status, request=httpx.Request("GET", url)),
+                        request=httpx.Request("GET", current),
+                        response=httpx.Response(exc.status, request=httpx.Request("GET", current)),
                     )
                 self.state.update(doc_id, state="paused", attempt_count=attempt + 1,
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,

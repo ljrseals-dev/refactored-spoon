@@ -89,7 +89,7 @@ class InternetArchiveService(BaseService):
                 f"{quote(filename, safe='/')}"
             )
             try:
-                self.http.download(url, destination, max_bytes=max_bytes)
+                self.downloader.download(self.name, url, destination, max_bytes=max_bytes, force=force)
             except (httpx.HTTPError, PermissionError, ValueError, OSError):
                 continue
             (destination.with_suffix(destination.suffix + ".source.json")).write_text(

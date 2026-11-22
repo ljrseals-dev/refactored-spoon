@@ -60,7 +60,7 @@ class GutenbergService(BaseService):
             ]
             for url in candidates:
                 try:
-                    size = self.http.download(url, destination, max_bytes=max_bytes)
+                    size = self.downloader.download(self.name, url, destination, max_bytes=max_bytes, force=force)
                     metadata = destination.with_suffix(".source.json")
                     metadata.write_text(json.dumps({
                         "title": title,
