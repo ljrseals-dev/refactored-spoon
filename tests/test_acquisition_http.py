@@ -58,6 +58,8 @@ def test_download_size_limit_and_https_only(tmp_path):
             client.download("https://example.org/file.txt", tmp_path / "file.txt", max_bytes=4)
         with pytest.raises(ValueError):
             client.get("http://example.org/file.txt")
+        with pytest.raises(ValueError, match="Credentials"):
+            client.get("https://user:secret@example.org/file.txt")
     finally:
         client.close()
 
