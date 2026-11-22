@@ -146,20 +146,59 @@ class RobotsAwareHTTP:
     def download(
         self, url: str, destination: Path, *, max_bytes: int = 25_000_000
     ) -> int:
-        response = self.get(url)
-        data = response.content
-        if len(data) > max_bytes:
-            raise ValueError(f"Download exceeds configured limit ({max_bytes} bytes)")
-        if not data:
-            raise ValueError("Source returned an empty document")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        current = url
+        redirects = 0
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".part")
         try:
-            temporary.write_bytes(data)
-            temporary.replace(destination)
+            for attempt in range(self.max_retries + 1):
+                origin = self._origin(current)
+                if not self.allowed(current):
+                    raise RobotsDenied(f"robots.txt disallows or cannot authorize: {current}")
+                self._throttle(origin)
+                try:
+                    with self._client.stream(
+                        "GET", current, headers={"User-Agent": self.user_agent}
+                    ) as response:
+                        if response.is_redirect:
+                            if redirects >= 5:
+                                raise RuntimeError("Too many source redirects")
+                            target = urljoin(current, response.headers.get("location", ""))
+                            self._origin(target)
+                            current = target
+                            redirects += 1
+                            continue
+                        if response.status_code == 429 or response.status_code >= 500:
+                            if attempt >= self.max_retries:
+                                response.raise_for_status()
+                            time.sleep(self._retry_delay(response.headers.get("retry-after"), attempt))
+                            continue
+                        response.raise_for_status()
+                        length = response.headers.get("content-length")
+                        if length and int(length) > max_bytes:
+                            raise ValueError(f"Download exceeds configured limit ({max_bytes} bytes)")
+                        total = 0
+                        with temporary.open("wb") as output:
+                            for chunk in response.iter_bytes():
+                                total += len(chunk)
+                                if total > max_bytes:
+                                    raise ValueError(
+                                        f"Download exceeds configured limit ({max_bytes} bytes)"
+                                    )
+                                output.write(chunk)
+                        if total == 0:
+                            raise ValueError("Source returned an empty document")
+                        temporary.replace(destination)
+                        return total
+                except httpx.HTTPError:
+                    if attempt >= self.max_retries:
+                        raise
+                    time.sleep(self._retry_delay(None, attempt))
+            raise RuntimeError("Source download retry budget exhausted")
         finally:
             temporary.unlink(missing_ok=True)
-        return len(data)
 
     def get_text(self, url: str, *, max_bytes: int = 50_000_000) -> str:
         response = self.get(url)

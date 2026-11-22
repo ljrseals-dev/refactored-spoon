@@ -5,7 +5,7 @@ Reliable offline-first document corpus + MCP server for local LLMs.
 ## Core Guarantees (from mode-isolation patch)
 
 - **CLASSICAL / ARCHIVE / AUTO** modes **never** touch an LLM provider, never perform network calls after corpus is built, and never discover API keys.
-- Only modes explicitly marked `allows_provider=True` may use an injected or discovered provider.
+- Only modes explicitly marked `allows_provider=True` may use a provider explicitly injected by the caller; there is no environment-key discovery.
 - All document acquisition is limited to clearly public-domain / open-license sources.
 - Once indexed, the system runs fully offline.
 
@@ -15,7 +15,7 @@ Configured in `config/services.yaml`. Add new legal sources by appending a servi
 
 Current defaults:
 - Project Gutenberg (public domain)
-- Wikipedia / Wikimedia dumps (CC BY-SA)
+- Wikipedia REST page extracts (CC BY-SA; large dumps are not automatically mirrored)
 - Internet Archive public-domain / CC0 items
 
 ## Quick Start
