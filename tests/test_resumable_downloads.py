@@ -103,3 +103,35 @@ def test_permanent_http_error_is_not_retried_without_force(tmp_path):
         assert hits["document"] == 1
     finally:
         http.close()
+
+
+def test_downloader_checks_robots_on_redirect_target(tmp_path):
+    blocked_requests = []
+
+    def handler(request):
+        if request.url.host == "source.example" and request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if request.url.host == "blocked.example" and request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
+        if request.url.host == "source.example" and request.url.path == "/start":
+            return httpx.Response(302, headers={
+                "Location": "https://blocked.example/private/document.txt"
+            })
+        blocked_requests.append(request)
+        return httpx.Response(200, content=b"must not be downloaded")
+
+    http = make_http(handler)
+    state = DownloadState(tmp_path / "state.db")
+    destination = tmp_path / "corpus" / "document.txt"
+    try:
+        downloader = ResumableDownloader(
+            http, state, tmp_path / "quarantine", retry_max=0
+        )
+        with pytest.raises(PermissionError, match="robots.txt"):
+            downloader.download(
+                "fixture", "https://source.example/start", destination
+            )
+        assert blocked_requests == []
+        assert not destination.exists()
+    finally:
+        http.close()
