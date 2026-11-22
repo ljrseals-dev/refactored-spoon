@@ -1,0 +1,755 @@
+From 600bee19b3a85769e984d5b9ad945aa230d6baaa Mon Sep 17 00:00:00 2001
+From: claude <noreply@anthropic.com>
+Date: Sat, 21 Nov 2026 21:50:46 -0600
+Subject: [PATCH] Audit fixes: safe FTS search, idempotent indexing, honest
+ engine, escaped HTML
+
+- Index: tokenize/quote queries (punctuation crashed FTS5), replace chunks on
+  re-index (were duplicated), close connections, clamp limit, return provenance
+- Chunker: stop at end of text; validate size/overlap
+- Engine: no invented truth_status, structured provider errors, source-bearing
+  evidence, honest offline messages, wired to LocalIndex via make_archive_search
+- HTML UI: escape query and document text
+- Tests: 7 -> 41; README states what acquisition really does
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DgowgDUMjUCuK2PAWwLLXN
+---
+ README.md                                 |  12 ++
+ src/offline_doc_mcp/engine/__init__.py    |   7 +-
+ src/offline_doc_mcp/engine/engine.py      | 193 +++++++++++++++-------
+ src/offline_doc_mcp/html_server.py        |  12 +-
+ src/offline_doc_mcp/mcp_server.py         |   3 +-
+ src/offline_doc_mcp/processing/chunker.py |   8 +-
+ src/offline_doc_mcp/processing/indexer.py |  65 ++++++--
+ tests/test_index.py                       |  82 +++++++++
+ tests/test_mode_isolation.py              |  88 +++++++++-
+ 9 files changed, 376 insertions(+), 94 deletions(-)
+ create mode 100644 tests/test_index.py
+
+diff --git a/README.md b/README.md
+index df0f0f3..8eac109 100644
+--- a/README.md
++++ b/README.md
+@@ -40,6 +40,18 @@ python -m offline_doc_mcp.mcp_server
+ python -m offline_doc_mcp.html_server --port 8765
+ ```
+ 
++## What acquisition actually does (v0.1)
++
++- `project_gutenberg`: downloads the catalog CSV and writes a small metadata stub per book. It does **not** yet download book text, and `license_filter` / `mirrors` / `formats` are not applied.
++- `wikipedia_dumps` and `internet_archive_pd`: create the output folder and a README; you place dumps / `ia` downloads there yourself.
++- `process`: no-op. Only `.txt` / `.md` / `.text` files under `data/` are indexed.
++
++## Retrieval and answers
++
++`LocalIndex.search` accepts free text (it is tokenized and quoted, so punctuation and FTS operators are safe) and returns passages with `title`, `path`, `doc_id` and `chunk_index`. `Engine(archive_search=make_archive_search(index))` turns those into answers with `sources` and `evidence`. Provider answers get `truth_status` only if the provider states a valid `TRUTH_STATUS:` line; otherwise `UNKNOWN`. Provider failures set `Answer.error`.
++
++Set `OFFLINE_DOC_INDEX` to point the MCP and HTML servers at a different index file.
++
+ ## Mode Isolation
+ 
+ See `src/offline_doc_mcp/engine/modes.py` and `engine.py`.  
+diff --git a/src/offline_doc_mcp/engine/__init__.py b/src/offline_doc_mcp/engine/__init__.py
+index ed4d6b5..ac491fc 100644
+--- a/src/offline_doc_mcp/engine/__init__.py
++++ b/src/offline_doc_mcp/engine/__init__.py
+@@ -1,4 +1,7 @@
+ from .modes import Mode, ModeSpec, MODES, resolve_mode
+-from .engine import Engine, Answer
++from .engine import Engine, Answer, make_archive_search, TRUTH_STATUSES
+ 
+-__all__ = ["Mode", "ModeSpec", "MODES", "resolve_mode", "Engine", "Answer"]
++__all__ = [
++    "Mode", "ModeSpec", "MODES", "resolve_mode",
++    "Engine", "Answer", "make_archive_search", "TRUTH_STATUSES",
++]
+diff --git a/src/offline_doc_mcp/engine/engine.py b/src/offline_doc_mcp/engine/engine.py
+index 758c12b..b9fd5e5 100644
+--- a/src/offline_doc_mcp/engine/engine.py
++++ b/src/offline_doc_mcp/engine/engine.py
+@@ -1,20 +1,30 @@
+-"""Brain Engine with strict mode isolation.
++"""Answering engine with strict mode isolation.
+ 
+-Supports two operating regimes:
+-1. Classical / offline  – uses Expert rules + Archive retrieval (no external LLM)
+-2. Hybrid / LLM-backed – uses an LLMProvider when one is configured
++Mode policy (see ``modes.py``):
+ 
+-Mode isolation is enforced here: CLASSICAL, ARCHIVE (and AUTO, which resolves
+-to CLASSICAL) NEVER touch an LLM provider, even if one was injected or API keys
+-are configured. Only modes whose ModeSpec.allows_provider is True may do so.
++* CLASSICAL, ARCHIVE and AUTO (which resolves to CLASSICAL) NEVER touch an LLM
++  provider, even if one was injected or ``require_llm`` is set.
++* ARCHIVE answers only with retrieved, source-bearing passages.
++* RESEARCH, AUDIT and HYBRID may use the injected provider.
++
++This package ships no rule engine and no provider discovery: a provider is only
++ever one the caller passes in explicitly.
+ """
+ 
+ from __future__ import annotations
+ 
++import re
+ from dataclasses import dataclass, field
+ from typing import Any, Callable, Optional
+ 
+-from .modes import Mode, ModeSpec, resolve_mode
++from .modes import Mode, resolve_mode
++
++TRUTH_STATUSES = ("OFFICIAL", "CONSENSUS", "PLAUSIBLE", "SPECULATIVE", "UNKNOWN")
++_STATUS_LINE = re.compile(r"^\s*TRUTH_STATUS:\s*([A-Za-z]+)\s*$", re.MULTILINE)
++
++# A retrieval function maps a question to passages, each a dict with at least
++# "content", "title" and "path" (what LocalIndex.search returns).
++ArchiveSearch = Callable[[str], list[dict[str, Any]]]
+ 
+ 
+ @dataclass
+@@ -24,94 +34,151 @@ class Answer:
+     answer: str
+     subject: str = ""
+     evidence: list[dict[str, Any]] = field(default_factory=list)
+-    classical: bool = True
++    sources: list[str] = field(default_factory=list)
++    classical: bool = True  # True when answered without an external provider
+     truth_status: str = "UNKNOWN"
++    error: Optional[str] = None
+     version: str = "0.1.0"
+ 
+ 
++def make_archive_search(index: Any, limit: int = 3) -> ArchiveSearch:
++    """Adapt a ``LocalIndex`` into the Engine's retrieval function."""
++    return lambda question: index.search(question, limit=limit)
++
++
++def _source_label(p: dict[str, Any]) -> str:
++    label = f"{p.get('title') or 'untitled'} ({p.get('path') or 'unknown path'}"
++    if p.get("chunk_index") is not None:
++        label += f", chunk {p['chunk_index']}"
++    return label + ")"
++
++
++def _evidence(passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
++    return [
++        {
++            "source": "archive",
++            "title": p.get("title"),
++            "path": p.get("path"),
++            "chunk_index": p.get("chunk_index"),
++            "text": (p.get("content") or "")[:500],
++        }
++        for p in passages
++    ]
++
++
++def _format_passages(passages: list[dict[str, Any]]) -> str:
++    return "\n\n".join(
++        f"[{i}] Source: {_source_label(p)}\n{p.get('content', '')}"
++        for i, p in enumerate(passages, 1)
++    )
++
++
++def _split_truth_status(raw: str) -> tuple[str, str]:
++    """Return (clean_text, status). Status is UNKNOWN unless the provider
++    stated a valid one; it is never assumed."""
++    status = "UNKNOWN"
++    m = None
++    for m in _STATUS_LINE.finditer(raw):
++        pass
++    if m is not None:
++        candidate = m.group(1).upper()
++        if candidate in TRUTH_STATUSES:
++            status = candidate
++        raw = _STATUS_LINE.sub("", raw)
++    return raw.strip(), status
++
++
+ class Engine:
+     def __init__(
+         self,
+         provider: Optional[Any] = None,
+         require_llm: bool = False,
+-        archive_search: Optional[Callable[[str], str]] = None,
++        archive_search: Optional[ArchiveSearch] = None,
+     ):
+         self._provider = provider
+         self.require_llm = require_llm
+-        self.archive_search = archive_search or (lambda q: "")
++        self.archive_search = archive_search
+ 
+     @property
+-    def provider(self):
+-        """Only return the provider if the current mode will allow it.
+-        Discovery is deferred until a provider-capable mode is active.
+-        """
++    def provider(self) -> Optional[Any]:
++        """The injected provider, or None. Never discovered from the
++        environment; only provider-capable modes may use it."""
+         return self._provider
+ 
++    def _retrieve(self, question: str) -> list[dict[str, Any]]:
++        if self.archive_search is None:
++            return []
++        return list(self.archive_search(question) or [])
++
+     def ask(self, question: str, mode: str | Mode = "CLASSICAL") -> Answer:
+         mode_spec = resolve_mode(mode)
++        mode_name = mode_spec.name.value
++        passages = self._retrieve(question)
++        evidence = _evidence(passages)
++        sources = [_source_label(p) for p in passages]
+ 
+-        # 1. Archive retrieval (always allowed)
+-        context = self.archive_search(question) if self.archive_search else ""
+-
+-        # 2. Expert rules / classical path would go here
+-        #    (placeholder – extend with your rule engine)
+-
+-        # 3. Fall back to LLM provider only if the mode permits it.
+-        #    Provider discovery (API-key lookup) is skipped entirely otherwise.
++        # ---- offline path: CLASSICAL / ARCHIVE / AUTO (and no-provider case)
+         provider = self.provider if mode_spec.allows_provider else None
+-
+         if provider is None:
+-            if context:
+-                answer_text = (
+-                    "No matching expert rule"
+-                    + ("" if not mode_spec.allows_provider else " and no LLM provider configured")
+-                    + ".\n\nRetrieved Archive context:\n"
+-                    + context
++            if mode_spec.allows_provider and self.require_llm:
++                return Answer(
++                    question=question,
++                    mode=mode_name,
++                    answer=f"{mode_name} mode requires an LLM provider but none was supplied.",
++                    classical=True,
++                    error="provider_required",
+                 )
++            if not passages:
+                 return Answer(
+                     question=question,
+-                    mode=mode_spec.name.value,
+-                    answer=answer_text,
+-                    evidence=[{"source": "archive", "text": context[:500]}],
++                    mode=mode_name,
++                    answer=(
++                        "No relevant, source-bearing documents were retrieved. "
++                        + (
++                            "Index documents, or supply a provider for this mode."
++                            if mode_spec.allows_provider
++                            else f"{mode_name} mode is offline-only and never calls an "
++                            "LLM provider; index more documents or use RESEARCH, AUDIT "
++                            "or HYBRID for model-backed answers."
++                        )
++                    ),
+                     classical=True,
+-                    truth_status="UNKNOWN",
+                 )
++            note = (
++                "Retrieved documents (no provider supplied):\n\n"
++                if mode_spec.allows_provider
++                else "Retrieved documents:\n\n"
++            )
+             return Answer(
+                 question=question,
+-                mode=mode_spec.name.value,
+-                answer=(
+-                    "No expert rule matched. "
+-                    + (
+-                        "No LLM provider is configured; import documents into the "
+-                        "Archive or set OPENAI_API_KEY / ANTHROPIC_API_KEY."
+-                        if mode_spec.allows_provider
+-                        else f"{mode_spec.name.value} mode is offline-only and never "
+-                        "calls an LLM provider. Import documents into the Archive, "
+-                        "add expert rules, or use HYBRID mode for model-backed answers."
+-                    )
+-                ),
++                mode=mode_name,
++                answer=note + _format_passages(passages),
++                evidence=evidence,
++                sources=sources,
+                 classical=True,
+-                truth_status="UNKNOWN",
+             )
+ 
+-        # Provider path (only reached when allows_provider=True)
++        # ---- provider path (only reached when allows_provider=True)
++        user = f"Question: {question}\n\nContext:\n{_format_passages(passages) or '(none)'}"
+         try:
+-            system = mode_spec.system_addendum
+-            user = f"Question: {question}\n\nContext:\n{context}"
+-            raw = provider.complete(system, user)
+-            return Answer(
+-                question=question,
+-                mode=mode_spec.name.value,
+-                answer=raw,
+-                evidence=[{"source": "provider+archive", "text": context[:300]}],
+-                classical=False,
+-                truth_status="CONSENSUS",
+-            )
+-        except Exception as exc:
++            raw = provider.complete(mode_spec.system_addendum, user)
++        except Exception as exc:  # provider failures must not look like answers
+             return Answer(
+                 question=question,
+-                mode=mode_spec.name.value,
+-                answer=f"Provider error: {exc}",
++                mode=mode_name,
++                answer=f"The provider failed ({type(exc).__name__}); no answer was produced.",
++                evidence=evidence,
++                sources=sources,
+                 classical=False,
+-                truth_status="UNKNOWN",
++                error=f"provider_error: {type(exc).__name__}",
+             )
++        text, status = _split_truth_status(str(raw))
++        return Answer(
++            question=question,
++            mode=mode_name,
++            answer=text,
++            evidence=evidence,
++            sources=sources,
++            classical=False,
++            truth_status=status,
++        )
+diff --git a/src/offline_doc_mcp/html_server.py b/src/offline_doc_mcp/html_server.py
+index 620e5ed..6eb0a22 100644
+--- a/src/offline_doc_mcp/html_server.py
++++ b/src/offline_doc_mcp/html_server.py
+@@ -2,6 +2,8 @@
+ 
+ from __future__ import annotations
+ 
++import html
++import os
+ from pathlib import Path
+ 
+ from fastapi import FastAPI, Query
+@@ -11,7 +13,7 @@ import uvicorn
+ from .processing.indexer import LocalIndex
+ 
+ app = FastAPI(title="Offline Doc MCP – Local Browser")
+-INDEX_DB = Path("data/index.db")
++INDEX_DB = Path(os.environ.get("OFFLINE_DOC_INDEX", "data/index.db"))
+ 
+ 
+ @app.get("/", response_class=HTMLResponse)
+@@ -47,15 +49,15 @@ def search(q: str = Query("")):
+         return HTMLResponse("<p>Empty query</p><p><a href='/'>Back</a></p>")
+     idx = LocalIndex(INDEX_DB)
+     results = idx.search(q, limit=12)
+-    parts = [f"<h1>Results for: {q}</h1><p><a href='/'>New search</a></p>"]
++    parts = [f"<h1>Results for: {html.escape(q)}</h1><p><a href='/'>New search</a></p>"]
+     if not results:
+         parts.append("<p>No matches.</p>")
+     for r in results:
+         parts.append(
+             f"<div class='result'>"
+-            f"<div class='title'>{r['title']}</div>"
+-            f"<div class='path'>{r['path']}</div>"
+-            f"<pre>{r['content'][:800]}</pre>"
++            f"<div class='title'>{html.escape(str(r['title']))}</div>"
++            f"<div class='path'>{html.escape(str(r['path']))}</div>"
++            f"<pre>{html.escape(r['content'][:800])}</pre>"
+             f"</div>"
+         )
+     return HTMLResponse("\n".join(parts))
+diff --git a/src/offline_doc_mcp/mcp_server.py b/src/offline_doc_mcp/mcp_server.py
+index 43e6bc9..4ed4ac2 100644
+--- a/src/offline_doc_mcp/mcp_server.py
++++ b/src/offline_doc_mcp/mcp_server.py
+@@ -8,6 +8,7 @@ honours allows_provider.
+ from __future__ import annotations
+ 
+ import json
++import os
+ from pathlib import Path
+ 
+ from mcp.server.fastmcp import FastMCP
+@@ -17,7 +18,7 @@ from .processing.indexer import LocalIndex
+ mcp = FastMCP("offline-doc-mcp")
+ 
+ # Default index location – override with env or config later
+-INDEX_DB = Path("data/index.db")
++INDEX_DB = Path(os.environ.get("OFFLINE_DOC_INDEX", "data/index.db"))
+ 
+ 
+ def get_index() -> LocalIndex:
+diff --git a/src/offline_doc_mcp/processing/chunker.py b/src/offline_doc_mcp/processing/chunker.py
+index 0f9d1c0..6c9a6e1 100644
+--- a/src/offline_doc_mcp/processing/chunker.py
++++ b/src/offline_doc_mcp/processing/chunker.py
+@@ -12,6 +12,10 @@ def chunk_text(
+     overlap: int = 150,
+     min_chars: int = 200,
+ ) -> list[str]:
++    if chunk_size <= 0:
++        raise ValueError("chunk_size must be positive")
++    if not 0 <= overlap < chunk_size:
++        raise ValueError("overlap must satisfy 0 <= overlap < chunk_size")
+     if not text or len(text) < min_chars:
+         return []
+     chunks = []
+@@ -29,9 +33,9 @@ def chunk_text(
+         chunk = text[start:end].strip()
+         if len(chunk) >= min_chars:
+             chunks.append(chunk)
++        if end >= length:
++            break  # reached the end; do not re-scan the tail as overlap
+         start = max(end - overlap, start + 1)
+-        if start >= length:
+-            break
+     return chunks
+ 
+ 
+diff --git a/src/offline_doc_mcp/processing/indexer.py b/src/offline_doc_mcp/processing/indexer.py
+index d5b1a57..a0ec0cb 100644
+--- a/src/offline_doc_mcp/processing/indexer.py
++++ b/src/offline_doc_mcp/processing/indexer.py
+@@ -2,21 +2,47 @@
+ 
+ from __future__ import annotations
+ 
++import re
+ import sqlite3
++from contextlib import contextmanager
+ from pathlib import Path
+ from typing import Any
+ 
+ from .chunker import chunk_text, iter_text_files
+ 
+ 
++MAX_LIMIT = 50
++_TOKEN = re.compile(r"\w+", re.UNICODE)
++
++
++def fts_query(raw: str) -> str:
++    """Turn free text into a safe FTS5 query (AND of quoted tokens).
++
++    Raw user text must never reach MATCH: operators and punctuation such as
++    ``'``, ``"``, ``-``, ``+``, ``AND``/``NOT`` raise OperationalError.
++    Returns "" when the text has no searchable tokens.
++    """
++    return " ".join(f'"{t}"' for t in _TOKEN.findall(raw or ""))
++
++
+ class LocalIndex:
+     def __init__(self, db_path: Path | str):
+         self.db_path = Path(db_path)
+         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+         self._init_db()
+ 
++    @contextmanager
++    def _connect(self):
++        """Commit on success, roll back on error, and always close."""
++        conn = sqlite3.connect(self.db_path)
++        try:
++            with conn:
++                yield conn
++        finally:
++            conn.close()
++
+     def _init_db(self) -> None:
+-        with sqlite3.connect(self.db_path) as conn:
++        with self._connect() as conn:
+             conn.execute(
+                 """
+                 CREATE TABLE IF NOT EXISTS documents (
+@@ -38,7 +64,6 @@ class LocalIndex:
+                 )
+                 """
+             )
+-            conn.commit()
+ 
+     def add_document(
+         self,
+@@ -53,45 +78,57 @@ class LocalIndex:
+         chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+         if not chunks:
+             return 0
+-        with sqlite3.connect(self.db_path) as conn:
++        with self._connect() as conn:
++            # Re-indexing replaces the document: drop its old chunks first so
++            # they are neither orphaned nor duplicated.
++            old = conn.execute(
++                "SELECT id FROM documents WHERE path = ?", (str(path),)
++            ).fetchone()
++            if old is not None:
++                conn.execute("DELETE FROM chunks WHERE doc_id = ?", (old[0],))
++                conn.execute("DELETE FROM documents WHERE id = ?", (old[0],))
+             cur = conn.execute(
+-                "INSERT OR REPLACE INTO documents (path, title, source) VALUES (?, ?, ?)",
++                "INSERT INTO documents (path, title, source) VALUES (?, ?, ?)",
+                 (str(path), title, source),
+             )
+             doc_id = cur.lastrowid
+-            for i, ch in enumerate(chunks):
+-                conn.execute(
+-                    "INSERT INTO chunks (doc_id, chunk_index, content, title, path) VALUES (?, ?, ?, ?, ?)",
+-                    (doc_id, i, ch, title, str(path)),
+-                )
+-            conn.commit()
++            conn.executemany(
++                "INSERT INTO chunks (doc_id, chunk_index, content, title, path) VALUES (?, ?, ?, ?, ?)",
++                [(doc_id, i, ch, title, str(path)) for i, ch in enumerate(chunks)],
++            )
+         return len(chunks)
+ 
+     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+-        with sqlite3.connect(self.db_path) as conn:
++        match = fts_query(query)
++        if not match:
++            return []
++        limit = max(1, min(int(limit), MAX_LIMIT))
++        with self._connect() as conn:
+             conn.row_factory = sqlite3.Row
+             rows = conn.execute(
+                 """
+-                SELECT content, title, path, rank
++                SELECT content, title, path, doc_id, chunk_index, rank
+                 FROM chunks
+                 WHERE chunks MATCH ?
+                 ORDER BY rank
+                 LIMIT ?
+                 """,
+-                (query, limit),
++                (match, limit),
+             ).fetchall()
+         return [
+             {
+                 "content": r["content"],
+                 "title": r["title"],
+                 "path": r["path"],
++                "doc_id": r["doc_id"],
++                "chunk_index": r["chunk_index"],
+                 "score": r["rank"],
+             }
+             for r in rows
+         ]
+ 
+     def stats(self) -> dict[str, int]:
+-        with sqlite3.connect(self.db_path) as conn:
++        with self._connect() as conn:
+             docs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+             chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+         return {"documents": docs, "chunks": chunks}
+diff --git a/tests/test_index.py b/tests/test_index.py
+new file mode 100644
+index 0000000..56354f9
+--- /dev/null
++++ b/tests/test_index.py
+@@ -0,0 +1,82 @@
++"""Tests for chunking, the FTS index, retrieval wiring and the HTML UI."""
++
++from __future__ import annotations
++
++import pytest
++
++from offline_doc_mcp.engine import Engine, make_archive_search
++from offline_doc_mcp.processing import LocalIndex, chunk_text
++from offline_doc_mcp.processing.indexer import fts_query
++
++TEXT = "The Hopfield network stores patterns as attractors. " * 60
++
++
++@pytest.fixture
++def idx(tmp_path):
++    return LocalIndex(tmp_path / "index.db")
++
++
++def test_chunker_terminates_without_rescanning_tail():
++    chunks = chunk_text("word " * 5000, chunk_size=1200, overlap=150)
++    assert 5 <= len(chunks) <= 30
++    assert all(len(c) >= 200 for c in chunks)
++
++
++@pytest.mark.parametrize("size,overlap", [(0, 0), (100, 100), (100, -1)])
++def test_chunker_rejects_bad_parameters(size, overlap):
++    with pytest.raises(ValueError):
++        chunk_text(TEXT, chunk_size=size, overlap=overlap)
++
++
++def test_reindexing_replaces_instead_of_duplicating(idx, tmp_path):
++    path = tmp_path / "a.txt"
++    n = idx.add_document(path, TEXT)
++    idx.add_document(path, TEXT)
++    assert idx.stats() == {"documents": 1, "chunks": n}
++
++
++def test_reindexing_with_changed_text_drops_old_chunks(idx, tmp_path):
++    path = tmp_path / "a.txt"
++    idx.add_document(path, TEXT)
++    idx.add_document(path, "Kohonen maps organise inputs topologically. " * 60)
++    assert idx.search("Hopfield") == []
++    assert idx.search("Kohonen")
++
++
++@pytest.mark.parametrize(
++    "query", ["what's a hopfield", "C++", 'hopfield "', "a-b", "NOT", "x AND", "<script>", "", "   "]
++)
++def test_search_never_raises_on_arbitrary_text(idx, tmp_path, query):
++    idx.add_document(tmp_path / "a.txt", TEXT)
++    assert isinstance(idx.search(query), list)
++
++
++def test_search_results_carry_provenance_and_limit_is_clamped(idx, tmp_path):
++    idx.add_document(tmp_path / "a.txt", TEXT)
++    results = idx.search("hopfield", limit=10_000)
++    assert results and len(results) <= 50
++    assert {"title", "path", "doc_id", "chunk_index", "content"} <= results[0].keys()
++    assert idx.search("hopfield", limit=-5)  # clamped to >= 1, not an error
++
++
++def test_fts_query_quotes_tokens():
++    assert fts_query("what's NOT a-b") == '"what" "s" "NOT" "a" "b"'
++
++
++def test_engine_answers_from_index_with_sources(idx, tmp_path):
++    idx.add_document(tmp_path / "hop.txt", TEXT, title="Hopfield notes")
++    engine = Engine(archive_search=make_archive_search(idx))
++    answer = engine.ask("hopfield attractors", mode="ARCHIVE")
++    assert answer.sources and "Hopfield notes" in answer.sources[0]
++    assert answer.classical is True
++
++
++def test_html_ui_escapes_query_and_content(idx, tmp_path, monkeypatch):
++    pytest.importorskip("fastapi")
++    from offline_doc_mcp import html_server
++
++    idx.add_document(tmp_path / "x.txt", "<img src=x onerror=alert(1)> hopfield " * 40, title="<b>T</b>")
++    monkeypatch.setattr(html_server, "INDEX_DB", idx.db_path)
++    body = html_server.search("<script>alert(1)</script> hopfield").body.decode()
++    assert "<script>" not in body and "<img src=x" not in body and "<b>T</b>" not in body
++    assert "&lt;script&gt;" in body
+diff --git a/tests/test_mode_isolation.py b/tests/test_mode_isolation.py
+index 4b9bb9b..d16e522 100644
+--- a/tests/test_mode_isolation.py
++++ b/tests/test_mode_isolation.py
+@@ -1,25 +1,33 @@
+-"""Regression tests for provider isolation (adapted from original patch)."""
++"""Regression tests for provider isolation and honest answering."""
+ 
+ from __future__ import annotations
+ 
+ import pytest
+ 
+-from offline_doc_mcp.engine import Engine, MODES, Mode
+-
++from offline_doc_mcp.engine import MODES, Engine, Mode
+ 
+ OFFLINE_MODES = ["CLASSICAL", "ARCHIVE", "AUTO"]
+ PROVIDER_MODES = ["HYBRID", "RESEARCH", "AUDIT"]
+-
+ NO_RULE_QUESTION = "zzqx unmatched gibberish question 12345"
+ 
++PASSAGE = {
++    "content": "A Hopfield network stores patterns as attractors.",
++    "title": "Hopfield notes",
++    "path": "data/hopfield.txt",
++    "chunk_index": 2,
++}
++
+ 
+ class RecordingProvider:
+-    def __init__(self):
++    def __init__(self, reply="fake answer from provider"):
+         self.calls = 0
++        self.reply = reply
++        self.last_user = ""
+ 
+     def complete(self, system: str, user: str) -> str:
+         self.calls += 1
+-        return "fake answer from provider"
++        self.last_user = user
++        return self.reply
+ 
+ 
+ def test_provider_policy_matches_spec():
+@@ -31,15 +39,81 @@ def test_provider_policy_matches_spec():
+ @pytest.mark.parametrize("mode", OFFLINE_MODES)
+ def test_offline_modes_never_call_injected_provider(mode):
+     provider = RecordingProvider()
+-    answer = Engine(provider=provider).ask(NO_RULE_QUESTION, mode=mode)
++    answer = Engine(provider=provider, archive_search=lambda q: [PASSAGE]).ask(
++        NO_RULE_QUESTION, mode=mode
++    )
+     assert provider.calls == 0
+     assert answer.classical is True
+     assert answer.truth_status == "UNKNOWN"
+ 
+ 
++@pytest.mark.parametrize("mode", OFFLINE_MODES)
++def test_offline_modes_ignore_require_llm(mode):
++    provider = RecordingProvider()
++    answer = Engine(provider=provider, require_llm=True).ask(NO_RULE_QUESTION, mode=mode)
++    assert provider.calls == 0
++    assert answer.error is None
++
++
+ @pytest.mark.parametrize("mode", PROVIDER_MODES)
+ def test_provider_modes_call_provider(mode):
+     provider = RecordingProvider()
+     answer = Engine(provider=provider).ask(NO_RULE_QUESTION, mode=mode)
+     assert provider.calls == 1
+     assert answer.classical is False
++
++
++@pytest.mark.parametrize("mode", PROVIDER_MODES)
++def test_require_llm_without_provider_is_an_error(mode):
++    answer = Engine(require_llm=True).ask(NO_RULE_QUESTION, mode=mode)
++    assert answer.error == "provider_required"
++
++
++@pytest.mark.parametrize("mode", OFFLINE_MODES)
++def test_offline_answers_carry_provenance(mode):
++    answer = Engine(archive_search=lambda q: [PASSAGE]).ask("hopfield", mode=mode)
++    assert "attractors" in answer.answer
++    assert answer.sources == ["Hopfield notes (data/hopfield.txt, chunk 2)"]
++    assert answer.evidence[0]["path"] == "data/hopfield.txt"
++    assert answer.evidence[0]["chunk_index"] == 2
++
++
++def test_no_documents_says_so_and_is_unknown():
++    answer = Engine().ask(NO_RULE_QUESTION, mode="ARCHIVE")
++    assert "No relevant" in answer.answer
++    assert answer.sources == [] and answer.evidence == []
++    assert answer.truth_status == "UNKNOWN"
++
++
++def test_provider_truth_status_is_never_invented():
++    answer = Engine(provider=RecordingProvider("a claim with no status")).ask("q", "HYBRID")
++    assert answer.truth_status == "UNKNOWN"
++
++
++def test_provider_truth_status_is_parsed_and_stripped():
++    reply = "Supported claim.\n\nTRUTH_STATUS: PLAUSIBLE"
++    answer = Engine(provider=RecordingProvider(reply)).ask("q", "HYBRID")
++    assert answer.truth_status == "PLAUSIBLE"
++    assert "TRUTH_STATUS" not in answer.answer
++
++
++def test_invalid_truth_status_falls_back_to_unknown():
++    reply = "Claim.\nTRUTH_STATUS: DEFINITELY_TRUE"
++    assert Engine(provider=RecordingProvider(reply)).ask("q", "AUDIT").truth_status == "UNKNOWN"
++
++
++def test_provider_receives_retrieved_sources():
++    provider = RecordingProvider()
++    Engine(provider=provider, archive_search=lambda q: [PASSAGE]).ask("q", "HYBRID")
++    assert "data/hopfield.txt" in provider.last_user
++
++
++def test_provider_failure_is_structured_not_an_answer():
++    class Boom:
++        def complete(self, system, user):
++            raise RuntimeError("secret-key-abc123")
++
++    answer = Engine(provider=Boom()).ask("q", "HYBRID")
++    assert answer.error == "provider_error: RuntimeError"
++    assert answer.truth_status == "UNKNOWN"
++    assert "secret-key-abc123" not in answer.answer
+-- 
+2.43.0
+
