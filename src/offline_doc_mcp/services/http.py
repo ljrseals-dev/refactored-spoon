@@ -87,9 +87,27 @@ class RobotsAwareHTTP:
         )
 
     def _throttle(self, origin: str) -> None:
+        # Respect both the configured floor and robots.txt extensions.
+        minimum_gap = self.min_delay
+        policy = self._robots.get(origin)
+        if isinstance(policy, RobotFileParser):
+            crawl_delay = policy.crawl_delay(self.user_agent)
+            if crawl_delay is None:
+                crawl_delay = policy.crawl_delay("*")
+            if crawl_delay is not None:
+                minimum_gap = max(minimum_gap, float(crawl_delay))
+            request_rate = (
+                policy.request_rate(self.user_agent)
+                or policy.request_rate("*")
+            )
+            if request_rate is not None and request_rate.requests > 0:
+                minimum_gap = max(
+                    minimum_gap,
+                    float(request_rate.seconds) / request_rate.requests,
+                )
         elapsed = time.monotonic() - self._last_request.get(origin, 0.0)
-        if elapsed < self.min_delay:
-            time.sleep(self.min_delay - elapsed)
+        if elapsed < minimum_gap:
+            time.sleep(minimum_gap - elapsed)
         self._last_request[origin] = time.monotonic()
 
     @staticmethod
