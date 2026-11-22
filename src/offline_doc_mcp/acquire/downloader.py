@@ -173,7 +173,9 @@ class ResumableDownloader:
                             raise DownloadValidationError(f"Unexpected range response: HTTP {response.status_code}")
                         content_range = response.headers.get("content-range", "")
                         match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
-                        if (not match or int(match.group(1)) != offset\n                                or (expected_size is not None and match.group(3) != "*"\n                                    and int(match.group(3)) != expected_size)):
+                        if (not match or int(match.group(1)) != offset
+                                or (expected_size is not None and match.group(3) != "*"
+                                    and int(match.group(3)) != expected_size)):
                             with partial.open("wb"):
                                 pass
                             self.state.update(doc_id, bytes_done=0, etag=None, last_modified=None)
