@@ -134,8 +134,8 @@ class ResumableDownloader:
             row = self.state.get(doc_id) or row
             if offset != int(row["bytes_done"]):
                 self.state.update(doc_id, bytes_done=offset)
-            origin = self.http._origin(url)
-            if not self.http.allowed(url):
+            origin = self.http._origin(current)
+            if not self.http.allowed(current):
                 self.state.update(doc_id, state="failed", last_error="robots.txt denied or unavailable")
                 raise PermissionError("robots.txt denied or could not authorize this URL")
             self.http._throttle(origin)
@@ -173,7 +173,7 @@ class ResumableDownloader:
                             raise DownloadValidationError(f"Unexpected range response: HTTP {response.status_code}")
                         content_range = response.headers.get("content-range", "")
                         match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
-                        if not match or int(match.group(1)) != offset:
+                        if (not match or int(match.group(1)) != offset\n                                or (expected_size is not None and match.group(3) != "*"\n                                    and int(match.group(3)) != expected_size)):
                             with partial.open("wb"):
                                 pass
                             self.state.update(doc_id, bytes_done=0, etag=None, last_modified=None)
@@ -192,19 +192,31 @@ class ResumableDownloader:
                     since_checkpoint = 0
                     with partial.open(mode) as output:
                         for chunk in response.iter_bytes(CHUNK_SIZE):
-                            if STOP_REQUESTED.is_set() or (
-                                self.max_bytes_per_run is not None
-                                and self.bytes_this_run + len(chunk) > self.max_bytes_per_run
-                            ):
+                            if STOP_REQUESTED.is_set():
                                 output.flush()
                                 os.fsync(output.fileno())
                                 self.state.update(doc_id, state="paused", bytes_done=partial.stat().st_size)
                                 raise PausedDownload()
-                            if partial.stat().st_size + len(chunk) > max_bytes:
+                            write_chunk = chunk
+                            if self.max_bytes_per_run is not None:
+                                budget_left = self.max_bytes_per_run - self.bytes_this_run
+                                if budget_left <= 0:
+                                    output.flush()
+                                    os.fsync(output.fileno())
+                                    self.state.update(doc_id, state="paused", bytes_done=partial.stat().st_size)
+                                    raise PausedDownload()
+                                if len(write_chunk) > budget_left:
+                                    write_chunk = write_chunk[:budget_left]
+                            if partial.stat().st_size + len(write_chunk) > max_bytes:
                                 raise DownloadValidationError("Download exceeds configured size limit")
-                            output.write(chunk)
-                            self.bytes_this_run += len(chunk)
-                            since_checkpoint += len(chunk)
+                            output.write(write_chunk)
+                            self.bytes_this_run += len(write_chunk)
+                            since_checkpoint += len(write_chunk)
+                            if len(write_chunk) < len(chunk):
+                                output.flush()
+                                os.fsync(output.fileno())
+                                self.state.update(doc_id, state="paused", bytes_done=partial.stat().st_size)
+                                raise PausedDownload()
                             if since_checkpoint >= CHECKPOINT_BYTES:
                                 output.flush()
                                 os.fsync(output.fileno())
