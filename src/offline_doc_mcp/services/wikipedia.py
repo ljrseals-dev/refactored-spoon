@@ -16,7 +16,7 @@ from .base import BaseService
 
 class WikipediaService(BaseService):
     def acquire(self, force: bool = False) -> int:
-        out = self.ensure_output_dir()
+        out = self.ensure_output_dir()\n        self.downloader.http = self.http
         queries = self.config.get("queries") or (
             [self.config["query"]] if self.config.get("query") else []
         )
