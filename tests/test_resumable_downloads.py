@@ -125,7 +125,7 @@ def test_downloader_checks_robots_on_redirect_target(tmp_path):
     destination = tmp_path / "corpus" / "document.txt"
     try:
         downloader = ResumableDownloader(
-            http, state, tmp_path / "quarantine", retry_max=0
+            http, state, tmp_path / "quarantine", retry_max=1
         )
         with pytest.raises(PermissionError, match="robots.txt"):
             downloader.download(
