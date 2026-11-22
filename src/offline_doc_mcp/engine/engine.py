@@ -1,20 +1,15 @@
-"""Brain Engine with strict mode isolation.
-
-Supports two operating regimes:
-1. Classical / offline  – uses Expert rules + Archive retrieval (no external LLM)
-2. Hybrid / LLM-backed – uses an LLMProvider when one is configured
-
-Mode isolation is enforced here: CLASSICAL, ARCHIVE (and AUTO, which resolves
-to CLASSICAL) NEVER touch an LLM provider, even if one was injected or API keys
-are configured. Only modes whose ModeSpec.allows_provider is True may do so.
-"""
-
+"""Answering engine with strict mode isolation and provenance."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-from .modes import Mode, ModeSpec, resolve_mode
+from .modes import Mode, resolve_mode
+
+TRUTH_STATUSES = ("OFFICIAL", "CONSENSUS", "PLAUSIBLE", "SPECULATIVE", "UNKNOWN")
+_STATUS_LINE = re.compile(r"^\s*TRUTH_STATUS:\s*([A-Za-z]+)\s*$", re.MULTILINE)
+ArchiveSearch = Callable[[str], list[dict[str, Any]]]
 
 
 @dataclass
@@ -24,94 +19,129 @@ class Answer:
     answer: str
     subject: str = ""
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
     classical: bool = True
     truth_status: str = "UNKNOWN"
+    error: str | None = None
     version: str = "0.1.0"
+
+
+def make_archive_search(index: Any, limit: int = 3) -> ArchiveSearch:
+    return lambda question: index.search(question, limit=limit)
+
+
+def _source_label(passage: dict[str, Any]) -> str:
+    label = f"{passage.get('title') or 'untitled'} ({passage.get('path') or 'unknown path'}"
+    if passage.get("chunk_index") is not None:
+        label += f", chunk {passage['chunk_index']}"
+    return label + ")"
+
+
+def _evidence(passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": "archive",
+            "title": item.get("title"),
+            "path": item.get("path"),
+            "doc_id": item.get("doc_id"),
+            "chunk_index": item.get("chunk_index"),
+            "text": str(item.get("content") or "")[:500],
+        }
+        for item in passages
+    ]
+
+
+def _format_passages(passages: list[dict[str, Any]]) -> str:
+    return "\n\n".join(
+        f"[{i}] Source: {_source_label(item)}\n{item.get('content', '')}"
+        for i, item in enumerate(passages, 1)
+    )
+
+
+def _split_truth_status(raw: str) -> tuple[str, str]:
+    matches = list(_STATUS_LINE.finditer(raw))
+    status = "UNKNOWN"
+    if matches:
+        candidate = matches[-1].group(1).upper()
+        if candidate in TRUTH_STATUSES:
+            status = candidate
+    return _STATUS_LINE.sub("", raw).strip(), status
 
 
 class Engine:
     def __init__(
         self,
-        provider: Optional[Any] = None,
+        provider: Any = None,
         require_llm: bool = False,
-        archive_search: Optional[Callable[[str], str]] = None,
+        archive_search: ArchiveSearch | None = None,
     ):
+        # Provider injection is explicit. There is deliberately no environment
+        # key lookup or implicit provider discovery in this package.
         self._provider = provider
         self.require_llm = require_llm
-        self.archive_search = archive_search or (lambda q: "")
+        self.archive_search = archive_search
 
     @property
-    def provider(self):
-        """Only return the provider if the current mode will allow it.
-        Discovery is deferred until a provider-capable mode is active.
-        """
+    def provider(self) -> Any:
         return self._provider
+
+    def _retrieve(self, question: str) -> list[dict[str, Any]]:
+        if self.archive_search is None:
+            return []
+        return list(self.archive_search(question) or [])
 
     def ask(self, question: str, mode: str | Mode = "CLASSICAL") -> Answer:
         mode_spec = resolve_mode(mode)
-
-        # 1. Archive retrieval (always allowed)
-        context = self.archive_search(question) if self.archive_search else ""
-
-        # 2. Expert rules / classical path would go here
-        #    (placeholder – extend with your rule engine)
-
-        # 3. Fall back to LLM provider only if the mode permits it.
-        #    Provider discovery (API-key lookup) is skipped entirely otherwise.
+        mode_name = mode_spec.name.value
+        passages = self._retrieve(question)
+        evidence = _evidence(passages)
+        sources = [_source_label(item) for item in passages]
         provider = self.provider if mode_spec.allows_provider else None
 
         if provider is None:
-            if context:
-                answer_text = (
-                    "No matching expert rule"
-                    + ("" if not mode_spec.allows_provider else " and no LLM provider configured")
-                    + ".\n\nRetrieved Archive context:\n"
-                    + context
-                )
+            if mode_spec.allows_provider and self.require_llm:
                 return Answer(
-                    question=question,
-                    mode=mode_spec.name.value,
-                    answer=answer_text,
-                    evidence=[{"source": "archive", "text": context[:500]}],
-                    classical=True,
-                    truth_status="UNKNOWN",
+                    question=question, mode=mode_name,
+                    answer=f"{mode_name} mode requires an explicitly supplied provider.",
+                    classical=True, error="provider_required",
                 )
+            if not passages:
+                return Answer(
+                    question=question, mode=mode_name,
+                    answer=(
+                        "No relevant, source-bearing documents were retrieved. "
+                        + (
+                            "Index documents or explicitly supply a provider for this mode."
+                            if mode_spec.allows_provider
+                            else f"{mode_name} mode is offline-only and never calls an LLM provider; "
+                                 "index more documents or use RESEARCH, AUDIT or HYBRID."
+                        )
+                    ),
+                    classical=True,
+                )
+            note = "Retrieved documents (no provider supplied):\n\n" if mode_spec.allows_provider else "Retrieved documents:\n\n"
             return Answer(
-                question=question,
-                mode=mode_spec.name.value,
-                answer=(
-                    "No expert rule matched. "
-                    + (
-                        "No LLM provider is configured; import documents into the "
-                        "Archive or set OPENAI_API_KEY / ANTHROPIC_API_KEY."
-                        if mode_spec.allows_provider
-                        else f"{mode_spec.name.value} mode is offline-only and never "
-                        "calls an LLM provider. Import documents into the Archive, "
-                        "add expert rules, or use HYBRID mode for model-backed answers."
-                    )
-                ),
-                classical=True,
-                truth_status="UNKNOWN",
+                question=question, mode=mode_name,
+                answer=note + _format_passages(passages),
+                evidence=evidence, sources=sources, classical=True,
             )
 
-        # Provider path (only reached when allows_provider=True)
+        user = (
+            f"Question: {question}\n\nContext:\n"
+            f"{_format_passages(passages) or '(none)'}"
+        )
         try:
-            system = mode_spec.system_addendum
-            user = f"Question: {question}\n\nContext:\n{context}"
-            raw = provider.complete(system, user)
-            return Answer(
-                question=question,
-                mode=mode_spec.name.value,
-                answer=raw,
-                evidence=[{"source": "provider+archive", "text": context[:300]}],
-                classical=False,
-                truth_status="CONSENSUS",
-            )
+            raw = provider.complete(mode_spec.system_addendum, user)
         except Exception as exc:
             return Answer(
-                question=question,
-                mode=mode_spec.name.value,
-                answer=f"Provider error: {exc}",
-                classical=False,
-                truth_status="UNKNOWN",
+                question=question, mode=mode_name,
+                answer=f"The provider failed ({type(exc).__name__}); no answer was produced.",
+                evidence=evidence, sources=sources, classical=False,
+                error=f"provider_error: {type(exc).__name__}",
             )
+        answer_text, truth_status = _split_truth_status(str(raw))
+        return Answer(
+            question=question, mode=mode_name, answer=answer_text,
+            evidence=evidence, sources=sources, classical=False,
+            truth_status=truth_status,
+        )

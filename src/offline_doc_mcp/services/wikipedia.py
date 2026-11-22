@@ -1,9 +1,15 @@
-"""Wikipedia dump service (CC BY-SA)."""
+"""Wikipedia REST API acquisition (CC BY-SA attribution retained).
 
+This is a bounded page-search downloader, not a multi-gigabyte dump mirror.
+"""
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
-from typing import Any
+from urllib.parse import quote
+
+import httpx
 
 from .base import BaseService
 
@@ -11,26 +17,63 @@ from .base import BaseService
 class WikipediaService(BaseService):
     def acquire(self, force: bool = False) -> int:
         out = self.ensure_output_dir()
-        languages = self.config.get("languages", ["en"])
-        print(
-            f"[{self.name}] Wikipedia dump acquisition is a manual/large-download step."
+        self.downloader.http = self.http
+        queries = self.config.get("queries") or (
+            [self.config["query"]] if self.config.get("query") else []
         )
-        print(
-            f"  Official dumps: https://dumps.wikimedia.org/"
-        )
-        print(
-            f"  Configured languages: {languages}"
-        )
-        print(
-            f"  Place extracted text or XML under: {out}"
-        )
-        # Create a marker so the pipeline knows the service was “run”
-        marker = out / "README_PLACE_DUMPS_HERE.txt"
-        if not marker.exists() or force:
-            marker.write_text(
-                "Place Wikimedia dump extracts (pages-articles) here.\n"
-                "See https://dumps.wikimedia.org/ for current files.\n"
-                "This service does not auto-download multi-GB dumps by default.\n",
-                encoding="utf-8",
-            )
-        return 0
+        max_pages = max(0, min(int(self.config.get("max_pages", 20)), 100))
+        count = 0
+        seen: set[str] = set()
+        for query in queries:
+            if count >= max_pages:
+                break
+            try:
+                response = self.http.get(
+                    "https://en.wikipedia.org/w/rest.php/v1/search/page",
+                    params={"q": str(query), "limit": min(20, max_pages - count)},
+                )
+                pages = response.json().get("pages", [])
+            except (httpx.HTTPError, ValueError, AttributeError):
+                continue
+            for page in pages:
+                if count >= max_pages:
+                    break
+                title = str(page.get("title") or "").strip()
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                try:
+                    summary = self.http.get(
+                        "https://en.wikipedia.org/api/rest_v1/page/summary/"
+                        + quote(title.replace(" ", "_"), safe="")
+                    ).json()
+                except (httpx.HTTPError, ValueError):
+                    continue
+                extract = str(summary.get("extract") or "").strip()
+                if len(extract) < 200:
+                    continue
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)[:100].strip("._") or "article"
+                destination = out / f"{safe}.txt"
+                if destination.exists() and not force:
+                    continue
+                page_url = summary.get("content_urls", {}).get("desktop", {}).get("page", "")
+                content = (
+                    f"{title}\n\n{extract}\n\nSource: {page_url}\n"
+                    "License: Creative Commons Attribution-ShareAlike (CC BY-SA); "
+                    "Wikipedia contributors are the authors.\n"
+                ).encode("utf-8")
+                self.downloader.store_content(self.name, page_url or title, destination, content)
+                (destination.with_suffix(".source.json")).write_text(
+                    json.dumps({
+                        "title": title,
+                        "source": "Wikipedia",
+                        "source_url": summary.get("content_urls", {}).get("desktop", {}).get("page"),
+                        "license": "CC BY-SA",
+                        "attribution": "Wikipedia contributors",
+                        "revision": summary.get("revision"),
+                    }, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                count += 1
+        print(f"[{self.name}] downloaded {count} attributed article extracts")
+        return count
