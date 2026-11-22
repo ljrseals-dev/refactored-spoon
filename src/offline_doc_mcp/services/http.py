@@ -55,6 +55,8 @@ class RobotsAwareHTTP:
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("Only HTTPS source URLs are permitted")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Credentials in source URLs are not permitted")
         return f"https://{parsed.netloc}"
 
     def allowed(self, url: str) -> bool:
