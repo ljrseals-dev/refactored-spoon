@@ -14,9 +14,9 @@ services:
       - "https://www.gutenberg.org"
       - "https://gutenberg.pglaf.org"
     license_filter: ["public domain", "Public domain", "CC0"]
-    max_books: 500          # safety limit for first run
+    max_books: 500          # safety limit for first run\n    max_book_bytes: 25000000\n    public_domain_jurisdiction: "US"\n    language: "en"\n    request_delay_seconds: 1.0\n    timeout_seconds: 30\n    max_retries: 3
     output_dir: "data/gutenberg"
-    formats: ["epub", "txt"]
+    formats: ["txt"]
     parser: "epub_txt"
 
   wikipedia_dumps:
@@ -30,7 +30,7 @@ services:
       # - es
       # - fr
     dump_type: "pages-articles"   # or pages-articles-multistream
-    output_dir: "data/wikipedia"
+    output_dir: "data/wikipedia"\n    max_pages: 20\n    request_delay_seconds: 1.0\n    timeout_seconds: 30\n    max_retries: 3
     parser: "wiki_xml"
 
   internet_archive_pd:
@@ -40,7 +40,7 @@ services:
     # Advanced search – keep existing query structure
     base_url: "https://archive.org"
     query: 'collection:opensource AND (publicdomain OR mediatype:texts) AND licenseurl:(*cc0* OR *publicdomain*)'
-    max_items: 200
+    max_items: 200\n    max_file_bytes: 50000000\n    request_delay_seconds: 1.0\n    timeout_seconds: 30\n    max_retries: 3
     output_dir: "data/ia"
     formats: ["pdf", "epub", "txt"]
     parser: "generic"

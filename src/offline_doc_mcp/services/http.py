@@ -63,7 +63,7 @@ class RobotsAwareHTTP:
             parser = RobotFileParser()
             parser.set_url(origin + "/robots.txt")
             try:
-                response = self._client.get(origin + "/robots.txt")
+                response = self._client.get(origin + "/robots.txt", headers={"User-Agent": self.user_agent})
                 if response.status_code == 404:
                     self._robots[origin] = True
                 elif 400 <= response.status_code < 500:
@@ -116,7 +116,7 @@ class RobotsAwareHTTP:
                 raise RobotsDenied(f"robots.txt disallows or cannot authorize: {current}")
             self._throttle(origin)
             try:
-                response = self._client.get(current, params=params if current == url else None)
+                response = self._client.get(\n                    current, params=params if current == url else None,\n                    headers={"User-Agent": self.user_agent},\n                )
             except httpx.HTTPError:
                 if attempt >= self.max_retries:
                     raise
