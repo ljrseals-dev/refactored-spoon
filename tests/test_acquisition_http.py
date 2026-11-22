@@ -1,0 +1,69 @@
+from pathlib import Path
+
+import httpx
+import pytest
+
+from offline_doc_mcp.services.http import RobotsAwareHTTP, RobotsDenied
+from offline_doc_mcp.services.internet_archive import _is_public_domain
+
+
+def client_for(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+def test_robots_policy_blocks_disallowed_path_and_allows_permitted_download(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nDisallow: /private\\n")
+        return httpx.Response(200, content=b"safe document")
+
+    client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, client=client_for(handler))
+    try:
+        target = tmp_path / "download.txt"
+        assert client.download("https://example.org/public.txt", target) == len(b"safe document")
+        assert target.read_bytes() == b"safe document"
+        with pytest.raises(RobotsDenied):
+            client.download("https://example.org/private/secret.txt", tmp_path / "secret.txt")
+        assert not (tmp_path / "secret.txt").exists()
+        assert all(request.headers.get("user-agent") for request in requests)
+    finally:
+        client.close()
+
+
+def test_robots_unavailable_fails_closed():
+    client = RobotsAwareHTTP(
+        "RefactoredSpoonBot/0.2", min_delay=0,
+        client=client_for(lambda request: httpx.Response(503)),
+    )
+    try:
+        assert client.allowed("https://example.org/document.txt") is False
+        with pytest.raises(RobotsDenied):
+            client.get("https://example.org/document.txt")
+    finally:
+        client.close()
+
+
+def test_download_size_limit_and_https_only(tmp_path):
+    client = RobotsAwareHTTP(
+        "RefactoredSpoonBot/0.2", min_delay=0,
+        client=client_for(lambda request: httpx.Response(
+            200, text="User-agent: *\\nAllow: /"
+        ) if request.url.path == "/robots.txt" else httpx.Response(200, content=b"12345")),
+    )
+    try:
+        with pytest.raises(ValueError):
+            client.download("https://example.org/file.txt", tmp_path / "file.txt", max_bytes=4)
+        with pytest.raises(ValueError):
+            client.get("http://example.org/file.txt")
+    finally:
+        client.close()
+
+
+def test_internet_archive_requires_public_domain_or_cc0_license():
+    assert _is_public_domain({"licenseurl": "https://creativecommons.org/publicdomain/zero/1.0/"})
+    assert _is_public_domain({"rights": "Public domain"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org/licenses/by/4.0/"})
+    assert not _is_public_domain({})
