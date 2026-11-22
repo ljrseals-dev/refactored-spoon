@@ -1,12 +1,21 @@
 """Local SQLite FTS index for offline search."""
-
 from __future__ import annotations
 
+import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .chunker import chunk_text, iter_text_files
+
+MAX_LIMIT = 50
+_TOKEN = re.compile(r"\w+", re.UNICODE)
+
+
+def fts_query(raw: str) -> str:
+    """Convert untrusted free text into an AND query of quoted FTS5 tokens."""
+    return " AND ".join(f'"{token}"' for token in _TOKEN.findall(raw or ""))
 
 
 class LocalIndex:
@@ -15,73 +24,78 @@ class LocalIndex:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS documents (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT UNIQUE,
-                    title TEXT,
-                    source TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
-                    doc_id UNINDEXED,
-                    chunk_index UNINDEXED,
-                    content,
-                    title,
-                    path
-                )
-                """
-            )
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS documents (
+                    id INTEGER PRIMARY KEY, path TEXT UNIQUE, title TEXT, source TEXT
+                )"""
+            )
+            conn.execute(
+                """CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+                    doc_id UNINDEXED, chunk_index UNINDEXED, content, title, path
+                )"""
+            )
 
     def add_document(
-        self,
-        path: Path,
-        text: str,
-        title: str | None = None,
-        source: str = "local",
-        chunk_size: int = 1200,
-        overlap: int = 150,
+        self, path: Path, text: str, title: str | None = None,
+        source: str = "local", chunk_size: int = 1200, overlap: int = 150,
     ) -> int:
         title = title or path.stem
         chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-        if not chunks:
-            return 0
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "INSERT OR REPLACE INTO documents (path, title, source) VALUES (?, ?, ?)",
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO documents(path,title,source) VALUES(?,?,?)
+                   ON CONFLICT(path) DO UPDATE SET title=excluded.title, source=excluded.source""",
                 (str(path), title, source),
             )
-            doc_id = cur.lastrowid
-            for i, ch in enumerate(chunks):
+            row = conn.execute(
+                "SELECT id FROM documents WHERE path=?", (str(path),)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Document index row was not created")
+            doc_id = int(row[0])
+            # FTS5 has no cascading foreign key; explicitly replace old chunks.
+            conn.execute("DELETE FROM chunks WHERE path=?", (str(path),))
+            for i, chunk in enumerate(chunks):
                 conn.execute(
-                    "INSERT INTO chunks (doc_id, chunk_index, content, title, path) VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, i, ch, title, str(path)),
+                    """INSERT INTO chunks(doc_id,chunk_index,content,title,path)
+                       VALUES(?,?,?,?,?)""",
+                    (doc_id, i, chunk, title, str(path)),
                 )
-            conn.commit()
         return len(chunks)
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        with sqlite3.connect(self.db_path) as conn:
+        safe_query = fts_query(query)
+        if not safe_query:
+            return []
+        try:
+            bounded_limit = max(1, min(int(limit), MAX_LIMIT))
+        except (TypeError, ValueError):
+            bounded_limit = 8
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """
-                SELECT content, title, path, rank
-                FROM chunks
-                WHERE chunks MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (query, limit),
+                """SELECT doc_id, chunk_index, content, title, path, rank
+                   FROM chunks WHERE chunks MATCH ? ORDER BY rank LIMIT ?""",
+                (safe_query, bounded_limit),
             ).fetchall()
         return [
             {
+                "doc_id": r["doc_id"],
+                "chunk_index": int(r["chunk_index"]),
                 "content": r["content"],
                 "title": r["title"],
                 "path": r["path"],
@@ -91,23 +105,20 @@ class LocalIndex:
         ]
 
     def stats(self) -> dict[str, int]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             docs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
             chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        return {"documents": docs, "chunks": chunks}
+        return {"documents": int(docs), "chunks": int(chunks)}
 
 
 def build_index_from_dir(
-    data_root: Path,
-    db_path: Path,
-    chunk_size: int = 1200,
-    overlap: int = 150,
+    data_root: Path, db_path: Path, chunk_size: int = 1200, overlap: int = 150,
 ) -> LocalIndex:
     idx = LocalIndex(db_path)
     for txt in iter_text_files(data_root):
         try:
-            text = txt.read_text(encoding="utf-8", errors="ignore")
-            idx.add_document(txt, text, chunk_size=chunk_size, overlap=overlap)
-        except Exception as exc:
-            print(f"[index] skip {txt}: {exc}")
+            content = txt.read_text(encoding="utf-8", errors="replace")
+            idx.add_document(txt, content, title=txt.stem, source=str(txt))
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(f"[index] skip {txt}: {type(exc).__name__}")
     return idx
