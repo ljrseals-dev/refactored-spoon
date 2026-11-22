@@ -67,3 +67,24 @@ def test_internet_archive_requires_public_domain_or_cc0_license():
     assert _is_public_domain({"rights": "Public domain"})
     assert not _is_public_domain({"licenseurl": "https://creativecommons.org/licenses/by/4.0/"})
     assert not _is_public_domain({})
+
+
+def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
+    client = RobotsAwareHTTP(
+        "RefactoredSpoonBot/0.2",
+        min_delay=0,
+        client=client_for(lambda request: httpx.Response(
+            200,
+            text="User-agent: *\nCrawl-delay: 2\nRequest-rate: 1/3\nAllow: /\n",
+        )),
+    )
+    sleeps = []
+    monkeypatch.setattr("offline_doc_mcp.services.http.time.sleep", sleeps.append)
+    try:
+        url = "https://example.org/document.txt"
+        assert client.allowed(url)
+        client._throttle("https://example.org")
+        client._throttle("https://example.org")
+        assert sleeps and sleeps[-1] >= 2.0
+    finally:
+        client.close()
