@@ -32,7 +32,8 @@ class RobotsAwareHTTP:
         max_retries: int = 3,
         client: httpx.Client | None = None,
     ):
-        if not user_agent or any(ch in user_agent for ch in "\r\n"):
+        if not user_agent or any(ch in user_agent for ch in "\r
+"):
             raise ValueError("A descriptive, single-line User-Agent is required")
         if timeout <= 0 or min_delay < 0 or not 0 <= max_retries <= 5:
             raise ValueError("Invalid HTTP timeout, delay, or retry count")
@@ -116,7 +117,10 @@ class RobotsAwareHTTP:
                 raise RobotsDenied(f"robots.txt disallows or cannot authorize: {current}")
             self._throttle(origin)
             try:
-                response = self._client.get(\n                    current, params=params if current == url else None,\n                    headers={"User-Agent": self.user_agent},\n                )
+                response = self._client.get(
+                    current, params=params if current == url else None,
+                    headers={"User-Agent": self.user_agent},
+                )
             except httpx.HTTPError:
                 if attempt >= self.max_retries:
                     raise
