@@ -62,7 +62,7 @@ class WikipediaService(BaseService):
                     "License: Creative Commons Attribution-ShareAlike (CC BY-SA); "
                     "Wikipedia contributors are the authors.\n"
                 ).encode("utf-8")
-                self.downloader.store_content(self.name, page_url or title, destination, content)
+                self.downloader.store_content(self.name, page_url or title, destination, content, force=force)
                 (destination.with_suffix(".source.json")).write_text(
                     json.dumps({
                         "title": title,
