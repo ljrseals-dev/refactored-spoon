@@ -60,7 +60,16 @@ class RobotsAwareHTTP:
             raise ValueError("Only HTTPS source URLs are permitted")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Credentials in source URLs are not permitted")
-        return f"https://{parsed.netloc}"
+        host = parsed.hostname.rstrip(".").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            raise ValueError("Local or internal source hosts are not permitted")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("Non-public IP addresses are not permitted as sources")
+        return f"https://{parsed.netloc"
 
     def allowed(self, url: str) -> bool:
         origin = self._origin(url)
