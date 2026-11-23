@@ -91,10 +91,12 @@ def test_directory_processing_extracts_text_and_html(tmp_path):
     source.mkdir()
     (source / "plain.txt").write_text("Text content", encoding="utf-8")
     (source / "page.html").write_text("<title>Heading</title><p>HTML content</p>", encoding="utf-8")
+    (source / "page.txt").write_text("plain page text", encoding="utf-8")
     result = process_directory(source, output)
-    assert result == {"processed": 2, "skipped": 0, "errors": 0}
+    assert result == {"processed": 3, "skipped": 0, "errors": 0}
     assert (output / "plain.txt").read_text().strip() == "Text content"
     assert "HTML content" in (output / "page.html.txt").read_text()
+    assert (output / "page.txt").read_text().strip() == "plain page text"
     assert (output / "plain.json").exists()
     (source / "book.pdf").write_bytes(b"not a pdf")
     (source / "book.docx").write_bytes(b"not a docx")
