@@ -23,6 +23,8 @@ def _is_public_domain(metadata: dict) -> bool:
     canonical_license = (
         parsed.scheme == "https"
         and parsed.hostname == "creativecommons.org"
+        and parsed.port in (None, 443)
+        and not parsed.query and not parsed.fragment
         and parsed.username is None
         and parsed.password is None
         and parsed.path.rstrip("/").lower() in _ALLOWED_LICENSE_PATHS
