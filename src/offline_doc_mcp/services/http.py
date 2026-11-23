@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import email.utils
 import ipaddress
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,7 @@ class RobotsAwareHTTP:
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Credentials in source URLs are not permitted")
         host = parsed.hostname.rstrip(".").lower()
-        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".test", ".home", ".lan", ".localdomain")):
             raise ValueError("Local or internal source hosts are not permitted")
         try:
             address = ipaddress.ip_address(host)
@@ -69,6 +70,8 @@ class RobotsAwareHTTP:
             address = None
         if address is not None and not address.is_global:
             raise ValueError("Non-public IP addresses are not permitted as sources")
+        if address is None and re.fullmatch(r"[0-9.]+", host):
+            raise ValueError("Ambiguous numeric source hosts are not permitted")
         return f"https://{parsed.netloc}"
 
     def allowed(self, url: str) -> bool:
