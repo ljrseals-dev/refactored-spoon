@@ -121,3 +121,25 @@ def test_source_urls_reject_local_and_non_public_hosts(url):
             client._origin(url)
     finally:
         client.close()
+
+
+def test_get_redirects_do_not_consume_retry_budget():
+    redirects = {"count": 0}
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        if request.url.path.startswith("/hop"):
+            redirects["count"] += 1
+            return httpx.Response(302, headers={"Location": f"/hop{redirects['count'] + 1}"})
+        if request.url.path == "/hop5":
+            return httpx.Response(200, text="final response")
+        return httpx.Response(404)
+
+    client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, max_retries=1, client=client_for(handler))
+    try:
+        response = client.get("https://example.org/hop1")
+        assert response.text == "final response"
+        assert redirects["count"] == 4
+    finally:
+        client.close()
