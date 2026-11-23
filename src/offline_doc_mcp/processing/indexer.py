@@ -82,14 +82,20 @@ class LocalIndex:
         """Remove document rows and their FTS passages in one transaction."""
         if not paths:
             return 0
+        removed = 0
+        # Bound each statement to avoid SQLite variable-limit failures for
+        # directories containing large numbers of stale documents.
         with self._connect() as conn:
-            placeholders = ",".join("?" for _ in paths)
-            rows = conn.execute(
-                f"SELECT id FROM documents WHERE path IN ({placeholders})", paths
-            ).fetchall()
-            conn.execute(f"DELETE FROM chunks WHERE path IN ({placeholders})", paths)
-            conn.execute(f"DELETE FROM documents WHERE path IN ({placeholders})", paths)
-        return len(rows)
+            for start in range(0, len(paths), 500):
+                batch = paths[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id FROM documents WHERE path IN ({placeholders})", batch
+                ).fetchall()
+                conn.execute(f"DELETE FROM chunks WHERE path IN ({placeholders})", batch)
+                conn.execute(f"DELETE FROM documents WHERE path IN ({placeholders})", batch)
+                removed += len(rows)
+        return removed
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         safe_query = fts_query(query)
