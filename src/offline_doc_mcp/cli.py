@@ -9,7 +9,8 @@ from rich.console import Console
 
 from .acquire import DownloadState, PausedDownload, STOP_REQUESTED
 from .processing import build_index_from_dir
-from .services import get_services
+from .processing.processor import process_directory
+from .services import get_services, load_config
 
 console = Console()
 
@@ -84,39 +85,37 @@ def acquire(service: str | None, force: bool, root: str, query: str | None,
 
 @main.command()
 @click.option("--root", type=click.Path(), default=".")
-@click.option("--db", default="data/download-state.sqlite3")
-def status(root: str, db: str):
-    """Show acquisition lifecycle state without exposing document contents."""
-    state = DownloadState(Path(root) / db)
-    with state.connect() as connection:
-        rows = connection.execute(
-            "SELECT state, COUNT(*) FROM downloads GROUP BY state ORDER BY state"
-        ).fetchall()
-    if not rows:
-        console.print("[yellow]No acquisition records yet. Run acquire first.[/yellow]")
-        return
-    for name, count in rows:
-        console.print(f"{name}: {count}")
-
-
-@main.command()
-@click.option("--root", type=click.Path(), default=".")
 def process(root: str):
-    """Explain supported input formats; raw text is indexed directly."""
-    data_dir = Path(root) / "data"
-    console.print(f"Place source-attributed .txt, .md, or .text files under {data_dir}.")
-    console.print("The index command reads these files directly; no hidden network processing occurs.")
+    """Extract supported local documents into text for indexing."""
+    root_path = Path(root)
+    config = load_config()
+    processing = config.get("processing", {})
+    source_dir = root_path / "data"
+    output_dir = root_path / processing.get("processed_dir", "data/processed")
+    result = process_directory(source_dir, output_dir)
+    console.print(
+        f"[green]Processed {result['processed']} files[/green]; "
+        f"skipped empty {result['skipped']}; errors {result['errors']}."
+    )
 
 
 @main.command()
 @click.option("--root", type=click.Path(), default=".")
 @click.option("--db", default="data/index.db")
 def index(root: str, db: str):
-    """Build or refresh the local FTS index from downloaded text files."""
+    """Build or refresh the local FTS index from processed text files."""
     root_path = Path(root)
+    config = load_config()
+    processing = config.get("processing", {})
+    source_dir = root_path / processing.get("processed_dir", "data/processed")
     db_path = root_path / db
-    console.print(f"Indexing under {root_path / 'data'} → {db_path}")
-    index_obj = build_index_from_dir(root_path / "data", db_path)
+    chunk_size = int(processing.get("chunk_size", 1200))
+    overlap = int(processing.get("chunk_overlap", 150))
+    min_chars = int(processing.get("min_chunk_chars", 200))
+    console.print(f"Indexing under {source_dir} → {db_path}")
+    index_obj = build_index_from_dir(
+        source_dir, db_path, chunk_size=chunk_size, overlap=overlap, min_chars=min_chars,
+    )
     stats = index_obj.stats()
     console.print(f"[green]Indexed {stats['documents']} docs / {stats['chunks']} chunks[/green]")
 
@@ -130,7 +129,7 @@ def search(db: str, limit: int, query: str):
     from .processing.indexer import LocalIndex
     results = LocalIndex(db).search(query, limit=limit)
     if not results:
-        console.print("[yellow]No matches. Acquire and index documents first.[/yellow]")
+        console.print("[yellow]No matches. Acquire, process and index documents first.[/yellow]")
     for i, result in enumerate(results, 1):
         console.print(f"\n[bold]{i}. {result['title']}[/bold] ({result['path']})")
         console.print(result["content"][:400] + "...")
