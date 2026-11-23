@@ -142,7 +142,8 @@ class RobotsAwareHTTP:
     def get(self, url: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
         current = url
         redirects = 0
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        while attempt <= self.max_retries:
             origin = self._origin(current)
             if not self.allowed(current):
                 raise RobotsDenied(f"robots.txt disallows or cannot authorize: {current}")
@@ -156,6 +157,7 @@ class RobotsAwareHTTP:
                 if attempt >= self.max_retries:
                     raise
                 time.sleep(self._retry_delay(None, attempt))
+                attempt += 1
                 continue
             if response.is_redirect:
                 if redirects >= 5:
@@ -169,10 +171,11 @@ class RobotsAwareHTTP:
                 if attempt >= self.max_retries:
                     response.raise_for_status()
                 time.sleep(self._retry_delay(response.headers.get("retry-after"), attempt))
+                attempt += 1
                 continue
             response.raise_for_status()
             return response
-        raise RuntimeError("Source request retry budget exhausted")
+        raise RuntimeError("Source request retry budget exhausted"
 
     def download(
         self, url: str, destination: Path, *, max_bytes: int = 25_000_000
