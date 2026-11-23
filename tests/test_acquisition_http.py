@@ -129,7 +129,7 @@ def test_get_redirects_do_not_consume_retry_budget():
     def handler(request):
         if request.url.path == "/robots.txt":
             return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
-        if request.url.path.startswith("/hop"):
+        if request.url.path.startswith("/hop") and request.url.path != "/hop5":
             redirects["count"] += 1
             return httpx.Response(302, headers={"Location": f"/hop{redirects['count'] + 1}"})
         if request.url.path == "/hop5":
