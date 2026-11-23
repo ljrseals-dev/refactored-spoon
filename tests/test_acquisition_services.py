@@ -107,7 +107,7 @@ def test_wikipedia_search_download_preserves_attribution(tmp_path):
     install_mock_http(service, handler)
     try:
         assert service.acquire() == 1
-        article = tmp_path / "data/wikipedia" / _article_output_name("Test topic")"
+        article = tmp_path / "data/wikipedia" / _article_output_name("Test topic")
         assert article.exists()
         assert "CC BY-SA" in article.read_text()
         metadata = json.loads(article.with_suffix(".source.json").read_text())
