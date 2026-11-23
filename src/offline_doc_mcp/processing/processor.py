@@ -56,7 +56,7 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
             if output_resolved == path.resolve() or output_resolved in path.resolve().parents:
                 continue
             rel = path.relative_to(source_dir)
-            target_name = rel.with_suffix(".txt") if path.suffix.lower() in {".txt", ".md", ".text"} else rel.with_suffix(rel.suffix.lower() + ".txt")
+            target_name = rel if path.suffix.lower() == ".txt" else rel.with_suffix(rel.suffix.lower() + ".txt")
             target = output_dir / target_name
             target.parent.mkdir(parents=True, exist_ok=True)
             content = extract_text(path)
