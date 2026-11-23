@@ -126,3 +126,16 @@ def test_processing_skips_bad_file_and_continues(tmp_path):
     process_directory(source, output)
     assert not (output / "gone.txt").exists()
     assert not (output / "gone.json").exists()
+
+\n\ndef test_processing_clears_stale_text_when_source_becomes_empty(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "source", tmp_path / "processed"
+    source.mkdir()
+    file = source / "emptying.txt"
+    file.write_text("non-empty original", encoding="utf-8")
+    process_directory(source, output)
+    file.write_text("   ", encoding="utf-8")
+    result = process_directory(source, output)
+    assert result["skipped"] == 1
+    assert not (output / "emptying.txt").exists()
+    assert not (output / "emptying.json").exists()
