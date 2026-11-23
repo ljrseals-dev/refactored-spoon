@@ -7,6 +7,8 @@ explicitly by their own service integration.
 from __future__ import annotations
 
 import email.utils
+import ipaddress
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +61,17 @@ class RobotsAwareHTTP:
             raise ValueError("Only HTTPS source URLs are permitted")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Credentials in source URLs are not permitted")
+        host = parsed.hostname.rstrip(".").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".test", ".home", ".lan", ".localdomain")):
+            raise ValueError("Local or internal source hosts are not permitted")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("Non-public IP addresses are not permitted as sources")
+        if address is None and re.fullmatch(r"[0-9.]+", host):
+            raise ValueError("Ambiguous numeric source hosts are not permitted")
         return f"https://{parsed.netloc}"
 
     def allowed(self, url: str) -> bool:
@@ -132,7 +145,8 @@ class RobotsAwareHTTP:
     def get(self, url: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
         current = url
         redirects = 0
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        while attempt <= self.max_retries:
             origin = self._origin(current)
             if not self.allowed(current):
                 raise RobotsDenied(f"robots.txt disallows or cannot authorize: {current}")
@@ -146,6 +160,7 @@ class RobotsAwareHTTP:
                 if attempt >= self.max_retries:
                     raise
                 time.sleep(self._retry_delay(None, attempt))
+                attempt += 1
                 continue
             if response.is_redirect:
                 if redirects >= 5:
@@ -159,6 +174,7 @@ class RobotsAwareHTTP:
                 if attempt >= self.max_retries:
                     response.raise_for_status()
                 time.sleep(self._retry_delay(response.headers.get("retry-after"), attempt))
+                attempt += 1
                 continue
             response.raise_for_status()
             return response

@@ -4,28 +4,38 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
 from .base import BaseService
 
 
-_ALLOWED_LICENSE_MARKERS = (
-    "creativecommons.org/publicdomain/zero/1.0",
-    "creativecommons.org/publicdomain/mark/1.0",
-    "creativecommons.org/publicdomain/zero/1.0/",
-    "creativecommons.org/publicdomain/mark/1.0/",
-)
+_ALLOWED_LICENSE_PATHS = {
+    "/publicdomain/zero/1.0",
+    "/publicdomain/mark/1.0",
+}
 
 
 def _is_public_domain(metadata: dict) -> bool:
-    license_url = str(metadata.get("licenseurl") or "").lower()
-    rights = str(metadata.get("rights") or "").lower()
-    return any(marker in license_url for marker in _ALLOWED_LICENSE_MARKERS) or (
-        "public domain" in rights and "copyright" not in rights
-    )
-
+    license_url = str(metadata.get("licenseurl") or "").strip()
+    try:
+        parsed = urlparse(license_url)
+        canonical_license = (
+            parsed.scheme == "https"
+            and parsed.hostname == "creativecommons.org"
+            and parsed.port in (None, 443)
+            and not parsed.query and not parsed.fragment
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path.rstrip("/").lower() in _ALLOWED_LICENSE_PATHS
+        )
+    except ValueError:
+        return False
+    # Free-form rights text is not reliable enough for substring checks.
+    rights = re.sub(r"\s+", " ", str(metadata.get("rights") or "").strip().lower())
+    exact_rights = rights in {"public domain", "public domain mark 1.0", "cc0"}
+    return canonical_license or exact_rights
 
 class InternetArchiveService(BaseService):
     def acquire(self, force: bool = False) -> int:

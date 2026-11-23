@@ -114,7 +114,16 @@ class ResumableDownloader:
                                 expected_size=expected_size, expected_sha256=expected_sha256)
         if row["state"] == "quarantined":
             raise DownloadValidationError("This source is quarantined; manual review required")
-        if row["state"] == "completed" and destination.exists():
+        if force:
+            # Force means a fresh fetch, not merely retrying a failed state.
+            partial.unlink(missing_ok=True)
+            self.state.update(
+                doc_id, state="pending", bytes_done=0, etag=None,
+                last_modified=None, attempt_count=0, last_error=None,
+                next_retry_at=None, completed_at=None,
+            )
+            row = self.state.get(doc_id) or row
+        if row["state"] == "completed" and destination.exists() and not force:
             issues = validate_file(destination, expected_size=expected_size,
                                    expected_sha256=expected_sha256)
             if not issues:
@@ -123,10 +132,11 @@ class ResumableDownloader:
             if not force:
                 raise RuntimeError("Download previously failed permanently; use force to retry")
             self.state.update(doc_id, state="pending", last_error=None, attempt_count=0)
-        if destination.exists() and (row["state"] != "completed"):
+        if destination.exists() and (row["state"] != "completed") and not force:
             destination.unlink()
         partial.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(self.retry_max + 1):
+        attempt = 0
+        while attempt <= self.retry_max:
             if STOP_REQUESTED.is_set():
                 self.state.update(doc_id, state="paused")
                 raise PausedDownload()
@@ -173,13 +183,28 @@ class ResumableDownloader:
                             raise DownloadValidationError(f"Unexpected range response: HTTP {response.status_code}")
                         content_range = response.headers.get("content-range", "")
                         match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
-                        if (not match or int(match.group(1)) != offset
-                                or (expected_size is not None and match.group(3) != "*"
-                                    and int(match.group(3)) != expected_size)):
+                        range_length = (
+                            int(match.group(2)) - int(match.group(1)) + 1
+                            if match else -1
+                        )
+                        range_total = int(match.group(3)) if match and match.group(3) != "*" else None
+                        response_length = response.headers.get("content-length")
+                        if (
+                            not match
+                            or int(match.group(1)) != offset
+                            or int(match.group(2)) < int(match.group(1))
+                            or range_total is None
+                            or int(match.group(2)) >= range_total
+                            or int(match.group(2)) != range_total - 1
+                            or (response_length is not None and int(response_length) != range_length)
+                            or (expected_size is not None and range_total != expected_size)
+                        ):
                             with partial.open("wb"):
                                 pass
                             self.state.update(doc_id, bytes_done=0, etag=None, last_modified=None)
                             raise _RestartDownload("Content-Range mismatch; restarting from byte zero")
+                        if expected_size is None:
+                            expected_size = range_total
                     elif response.status_code != 200:
                         raise DownloadValidationError(f"Unexpected initial response: HTTP {response.status_code}")
                     length = response.headers.get("content-length")
@@ -246,6 +271,7 @@ class ResumableDownloader:
                                       completed_at=utcnow(), last_error=None, next_retry_at=None)
                     return size
             except _RestartDownload:
+                attempt += 1
                 continue
             except PausedDownload:
                 raise
@@ -264,6 +290,7 @@ class ResumableDownloader:
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,
                                   last_error=f"retryable HTTP {exc.status}")
                 time.sleep(exc.delay)
+                attempt += 1
             except httpx.HTTPStatusError:
                 self.state.update(doc_id, state="failed", attempt_count=attempt + 1,
                                   last_error="permanent HTTP response")
@@ -277,9 +304,10 @@ class ResumableDownloader:
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,
                                   last_error=type(exc).__name__)
                 time.sleep(min(30, 2 ** attempt) * (0.5 + random.random()))
+                attempt += 1
         raise RuntimeError("Download retry budget exhausted")
 
-    def store_content(self, source: str, url: str, destination: Path, content: bytes) -> int:
+    def store_content(self, source: str, url: str, destination: Path, content: bytes, *, force: bool = False) -> int:
         """Atomically persist source-derived text using the download state table."""
         identity = hashlib.sha256(f"{source}\0{url}".encode()).hexdigest()
         doc_id = f"{source[:24]}-{identity[:32]}"
@@ -291,9 +319,18 @@ class ResumableDownloader:
                                 expected_size=len(content), expected_sha256=digest)
         if row["state"] == "quarantined":
             raise DownloadValidationError("This source is quarantined; manual review required")
-        if row["state"] == "completed" and destination.exists():
+        if row["state"] == "quarantined":
+            raise DownloadValidationError("This source is quarantined; manual review required")
+        if row["state"] == "completed" and destination.exists() and not force:
             if not validate_file(destination, expected_size=len(content), expected_sha256=digest):
                 return destination.stat().st_size
+        if force:
+            self.state.update(
+                doc_id, state="pending", bytes_done=0, etag=None,
+                last_modified=None, attempt_count=0, last_error=None,
+                next_retry_at=None, completed_at=None,
+            )
+            partial.unlink(missing_ok=True)
         with partial.open("wb") as stream:
             stream.write(content)
             stream.flush()

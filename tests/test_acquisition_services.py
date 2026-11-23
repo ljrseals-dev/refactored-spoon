@@ -6,7 +6,7 @@ import httpx
 
 from offline_doc_mcp.services.gutenberg import GutenbergService
 from offline_doc_mcp.services.internet_archive import InternetArchiveService
-from offline_doc_mcp.services.wikipedia import WikipediaService
+from offline_doc_mcp.services.wikipedia import WikipediaService, _article_output_name
 from offline_doc_mcp.services.http import RobotsAwareHTTP
 
 
@@ -107,10 +107,52 @@ def test_wikipedia_search_download_preserves_attribution(tmp_path):
     install_mock_http(service, handler)
     try:
         assert service.acquire() == 1
-        article = tmp_path / "data/wikipedia/Test_topic.txt"
+        article = tmp_path / "data/wikipedia" / _article_output_name("Test topic")
         assert article.exists()
         assert "CC BY-SA" in article.read_text()
         metadata = json.loads(article.with_suffix(".source.json").read_text())
         assert metadata["revision"] == "12345"
+    finally:
+        service.close()
+
+
+def test_wikipedia_output_names_do_not_collide_after_sanitization():
+    assert _article_output_name("A/B") != _article_output_name("A?B")
+    assert _article_output_name("../escape") == _article_output_name("../escape")
+    assert "/" not in _article_output_name("../escape")
+
+
+def test_wikipedia_force_refresh_replaces_existing_extract(tmp_path):
+    text = {"extract": "Original article summary content. " * 12}
+    title = "Refresh test"
+    url = "https://en.wikipedia.org/wiki/Refresh_test"
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        if request.url.path == "/w/rest.php/v1/search/page":
+            return httpx.Response(200, json={"pages": [{"title": title}]})
+        if request.url.path == "/api/rest_v1/page/summary/Refresh_test":
+            return httpx.Response(200, json={
+                "title": title, "extract": text["extract"],
+                "content_urls": {"desktop": {"page": url}},
+                "revision": "revision-1",
+            })
+        return httpx.Response(404)
+
+    service = WikipediaService("wikipedia_dumps", {
+        "output_dir": "data/wikipedia", "queries": ["refresh test"],
+        "max_pages": 1, "request_delay_seconds": 0,
+    }, tmp_path)
+    install_mock_http(service, handler)
+    article = tmp_path / "data/wikipedia" / _article_output_name(title)
+    try:
+        assert service.acquire() == 1
+        old = article.read_text(encoding="utf-8")
+        text["extract"] = "Refreshed article summary content. " * 12
+        assert service.acquire(force=True) == 1
+        new = article.read_text(encoding="utf-8")
+        assert old != new
+        assert "Refreshed article summary content" in new
     finally:
         service.close()

@@ -69,6 +69,16 @@ def test_internet_archive_requires_public_domain_or_cc0_license():
     assert _is_public_domain({"rights": "Public domain"})
     assert not _is_public_domain({"licenseurl": "https://creativecommons.org/licenses/by/4.0/"})
     assert not _is_public_domain({})
+    assert _is_public_domain({"licenseurl": "https://creativecommons.org/publicdomain/mark/1.0/"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org/publicdomain/zero/1.0.evil"})
+    assert not _is_public_domain({"licenseurl": "https://fakecreativecommons.org/publicdomain/zero/1.0"})
+    assert not _is_public_domain({"licenseurl": "http://creativecommons.org/publicdomain/zero/1.0"})
+    assert not _is_public_domain({"rights": "Public domain status has not been verified"})
+    assert not _is_public_domain({"rights": "copyright public domain text"})
+    assert _is_public_domain({"rights": "Public  Domain"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org:8443/publicdomain/zero/1.0/"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org:badport/publicdomain/zero/1.0/"})
+    assert not _is_public_domain({"licenseurl": "https://[invalid/publicdomain/zero/1.0/"})
 
 
 def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
@@ -88,5 +98,52 @@ def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
         client._throttle("https://example.org")
         client._throttle("https://example.org")
         assert sleeps and sleeps[-1] >= 2.0
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://localhost/private",
+        "https://service.local/private",
+        "https://service.internal/private",
+        "https://127.0.0.1/private",
+        "https://10.0.0.2/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::1]/private",
+        "https://2130706433/private",
+        "https://127.1/private",
+    ],
+)
+def test_source_urls_reject_local_and_non_public_hosts(url):
+    client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, client=client_for(
+        lambda request: httpx.Response(200, text="User-agent: *\\nAllow: /")
+    ))
+    try:
+        with pytest.raises(ValueError, match="Local|Non-public"):
+            client._origin(url)
+    finally:
+        client.close()
+
+
+def test_get_redirects_do_not_consume_retry_budget():
+    redirects = {"count": 0}
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        if request.url.path.startswith("/hop") and request.url.path != "/hop5":
+            redirects["count"] += 1
+            return httpx.Response(302, headers={"Location": f"/hop{redirects['count'] + 1}"})
+        if request.url.path == "/hop5":
+            return httpx.Response(200, text="final response")
+        return httpx.Response(404)
+
+    client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, max_retries=1, client=client_for(handler))
+    try:
+        response = client.get("https://example.org/hop1")
+        assert response.text == "final response"
+        assert redirects["count"] == 4
     finally:
         client.close()
