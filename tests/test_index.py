@@ -96,3 +96,14 @@ def test_directory_processing_extracts_text_and_html(tmp_path):
     assert (output / "plain.txt").read_text().strip() == "Text content"
     assert "HTML content" in (output / "page.txt").read_text()
     assert (output / "plain.json").exists()
+
+
+def test_processing_skips_bad_file_and_continues(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "input", tmp_path / "output"
+    source.mkdir()
+    (source / "broken.pdf").write_bytes(b"not a pdf")
+    (source / "good.txt").write_text("valid content", encoding="utf-8")
+    result = process_directory(source, output)
+    assert result == {"processed": 1, "skipped": 0, "errors": 1}
+    assert (output / "good.txt").read_text().strip() == "valid content"
