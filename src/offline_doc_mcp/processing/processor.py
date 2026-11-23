@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Iterable
 
 SUPPORTED = {".txt", ".md", ".text", ".html", ".htm", ".pdf", ".epub", ".docx"}
 
@@ -71,7 +70,9 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
             meta_tmp.write_text(json.dumps({"source": str(rel), "format": path.suffix.lower()}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             os.replace(meta_tmp, meta)
             processed += 1
-        except (OSError, ValueError, ImportError) as exc:
+        except Exception as exc:
+            # Parsing libraries raise format-specific exceptions; isolate failures
+            # per file so one malformed document does not abort the batch.
             errors += 1
             print(f"[process] skip {path}: {type(exc).__name__}")
     return {"processed": processed, "skipped": skipped, "errors": errors}
