@@ -14,6 +14,8 @@ def chunk_text(
         raise ValueError("overlap must satisfy 0 <= overlap < chunk_size")
     if min_chars < 0:
         raise ValueError("min_chars must not be negative")
+    if min_chars > chunk_size:
+        raise ValueError("min_chars must not exceed chunk_size")
     if not text or len(text) < min_chars:
         return []
     chunks: list[str] = []
@@ -21,7 +23,7 @@ def chunk_text(
     length = len(text)
     while start < length:
         end = min(start + chunk_size, length)
-        if end < length:
+        if end < length and min_chars:
             for separator in ("\n\n", "\n", ". ", " "):
                 position = text.rfind(separator, start + min_chars, end)
                 if position != -1:
@@ -32,12 +34,13 @@ def chunk_text(
             chunks.append(chunk)
         if end >= length:
             break
+        # Guarantee forward progress even when a boundary/overlap is awkward.
         start = max(end - overlap, start + 1)
     return chunks
 
 
 def iter_text_files(root: Path) -> Iterator[Path]:
-    if not root.exists():
+    if not root.exists() or not root.is_dir():
         return
     for path in root.rglob("*"):
         if path.is_symlink():
