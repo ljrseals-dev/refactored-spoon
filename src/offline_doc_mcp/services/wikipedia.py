@@ -4,6 +4,7 @@ This is a bounded page-search downloader, not a multi-gigabyte dump mirror.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -41,7 +42,6 @@ class WikipediaService(BaseService):
                 title = str(page.get("title") or "").strip()
                 if not title or title in seen:
                     continue
-                seen.add(title)
                 try:
                     summary = self.http.get(
                         "https://en.wikipedia.org/api/rest_v1/page/summary/"
@@ -52,8 +52,9 @@ class WikipediaService(BaseService):
                 extract = str(summary.get("extract") or "").strip()
                 if len(extract) < 200:
                     continue
-                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)[:100].strip("._") or "article"
-                destination = out / f"{safe}.txt"
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)[:80].strip("._") or "article"
+                suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:12]
+                destination = out / f"{safe}-{suffix}.txt"
                 if destination.exists() and not force:
                     continue
                 page_url = summary.get("content_urls", {}).get("desktop", {}).get("page", "")
@@ -74,6 +75,7 @@ class WikipediaService(BaseService):
                     }, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
+                seen.add(title)
                 count += 1
         print(f"[{self.name}] downloaded {count} attributed article extracts")
         return count
