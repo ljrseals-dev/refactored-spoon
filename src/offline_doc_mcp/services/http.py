@@ -69,7 +69,7 @@ class RobotsAwareHTTP:
             address = None
         if address is not None and not address.is_global:
             raise ValueError("Non-public IP addresses are not permitted as sources")
-        return f"https://{parsed.netloc"
+        return f"https://{parsed.netloc}"
 
     def allowed(self, url: str) -> bool:
         origin = self._origin(url)
