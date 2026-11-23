@@ -135,7 +135,8 @@ class ResumableDownloader:
         if destination.exists() and (row["state"] != "completed") and not force:
             destination.unlink()
         partial.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(self.retry_max + 1):
+        attempt = 0
+        while attempt <= self.retry_max:
             if STOP_REQUESTED.is_set():
                 self.state.update(doc_id, state="paused")
                 raise PausedDownload()
@@ -255,6 +256,7 @@ class ResumableDownloader:
                                       completed_at=utcnow(), last_error=None, next_retry_at=None)
                     return size
             except _RestartDownload:
+                attempt += 1
                 continue
             except PausedDownload:
                 raise
@@ -273,6 +275,7 @@ class ResumableDownloader:
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,
                                   last_error=f"retryable HTTP {exc.status}")
                 time.sleep(exc.delay)
+                attempt += 1
             except httpx.HTTPStatusError:
                 self.state.update(doc_id, state="failed", attempt_count=attempt + 1,
                                   last_error="permanent HTTP response")
@@ -286,6 +289,7 @@ class ResumableDownloader:
                                   bytes_done=partial.stat().st_size if partial.exists() else 0,
                                   last_error=type(exc).__name__)
                 time.sleep(min(30, 2 ** attempt) * (0.5 + random.random()))
+                attempt += 1
         raise RuntimeError("Download retry budget exhausted")
 
     def store_content(self, source: str, url: str, destination: Path, content: bytes, *, force: bool = False) -> int:
