@@ -178,3 +178,63 @@ def test_store_content_force_refreshes_completed_record(tmp_path):
     assert destination.read_bytes() == new
     row = state.get(next(iter(state.connect().execute("SELECT doc_id FROM downloads")))[0])
     assert row["state"] == "completed"
+
+
+def test_redirects_do_not_consume_retry_budget(tmp_path):
+    payload = b"redirected source content " * 20
+    hits = {"redirects": 0}
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        if request.url.path.startswith("/r"):
+            hits["redirects"] += 1
+            next_path = "/r" + str(hits["redirects"] + 1) if hits["redirects"] < 4 else "/final"
+            return httpx.Response(302, headers={"Location": next_path})
+        if request.url.path == "/final":
+            return httpx.Response(200, content=payload)
+        return httpx.Response(404)
+
+    http = make_http(handler)
+    state = DownloadState(tmp_path / "state.db")
+    downloader = ResumableDownloader(http, state, tmp_path / "quarantine", retry_max=1)
+    destination = tmp_path / "document.txt"
+    try:
+        assert downloader.download("fixture", "https://example.org/r1", destination) == len(payload)
+        assert hits["redirects"] == 4
+        assert destination.read_bytes() == payload
+    finally:
+        http.close()
+        STOP_REQUESTED.clear()
+
+
+def test_resume_rejects_inconsistent_content_range_and_restarts(tmp_path):
+    payload = b"restarted source text " * 40
+    ranged_hits = {"count": 0}
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        if request.headers.get("range"):
+            ranged_hits["count"] += 1
+            offset = int(request.headers["range"].split("=")[1].split("-")[0])
+            return httpx.Response(206, content=payload[offset:], headers={
+                "Content-Range": f"bytes {offset}-{len(payload)-2}/{len(payload)}",
+                "ETag": '"v1"',
+            })
+        return httpx.Response(200, content=payload)
+
+    http = make_http(handler)
+    state = DownloadState(tmp_path / "state.db")
+    first = ResumableDownloader(http, state, tmp_path / "quarantine", max_bytes_per_run=5)
+    destination = tmp_path / "document.txt"
+    try:
+        with pytest.raises(PausedDownload):
+            first.download("fixture", "https://example.org/doc.txt", destination)
+        resumed = ResumableDownloader(http, state, tmp_path / "quarantine")
+        assert resumed.download("fixture", "https://example.org/doc.txt", destination) == len(payload)
+        assert ranged_hits["count"] == 1
+        assert destination.read_bytes() == payload
+    finally:
+        http.close()
+        STOP_REQUESTED.clear()
