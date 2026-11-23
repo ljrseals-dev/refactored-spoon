@@ -2,6 +2,10 @@
 
 Reliable offline-first document corpus + MCP server for local LLMs.
 
+## Retrieval-Augmented Generation (RAG) Pipeline
+
+The answering path is RAG-first: **Ingest → Parse → Chunk → Embed/Index → Retrieve → Generate → Cite**. The current local retrieval implementation uses SQLite FTS lexical search; semantic embeddings and reranking are not yet implemented, so those stages are explicitly future capabilities rather than claimed features. Provider-enabled modes receive numbered retrieved passages and grounding instructions; answers must cite passage markers and acknowledge missing context. Offline modes only retrieve and return source passages and never invoke a provider.
+
 ## Core Guarantees (from mode-isolation patch)
 
 - **CLASSICAL / ARCHIVE / AUTO** modes **never** touch an LLM provider, never perform network calls after corpus is built, and never discover API keys.
