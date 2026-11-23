@@ -98,6 +98,13 @@ class Engine:
         sources = [_source_label(item) for item in passages]
         provider = self.provider if mode_spec.allows_provider else None
 
+        if provider is not None and not passages:
+            return Answer(
+                question=question, mode=mode_name,
+                answer="No relevant source passages were retrieved. Add or index source material before requesting a grounded answer.",
+                classical=True, error="no_retrieved_context",
+            )
+
         if provider is None:
             if mode_spec.allows_provider and self.require_llm:
                 return Answer(
