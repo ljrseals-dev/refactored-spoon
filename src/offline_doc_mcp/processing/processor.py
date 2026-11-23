@@ -76,4 +76,22 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
             # per file so one malformed document does not abort the batch.
             errors += 1
             print(f"[process] skip {path}: {type(exc).__name__}")
+    # Remove generated text for source files deleted from the input tree. The
+    # sidecar records the source-relative path so unrelated user text files
+    # in the output folder are never deleted.
+    for sidecar in output_dir.rglob("*.json") if output_dir.exists() else ():
+        try:
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+            source_rel = metadata.get("source")
+            if not isinstance(source_rel, str) or not source_rel:
+                continue
+            source_path = source_dir / source_rel
+            if source_path.exists() or source_rel in seen_sources:
+                continue
+            generated_text = sidecar.with_suffix(".txt")
+            generated_text.unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError):
+            errors += 1
+            print(f"[process] stale sidecar cleanup failed: {sidecar}")
     return {"processed": processed, "skipped": skipped, "errors": errors}
