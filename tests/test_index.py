@@ -114,3 +114,15 @@ def test_processing_skips_bad_file_and_continues(tmp_path):
     result = process_directory(source, output)
     assert result == {"processed": 1, "skipped": 0, "errors": 1}
     assert (output / "good.txt").read_text().strip() == "valid content"
+
+\n\ndef test_processing_removes_generated_output_when_source_is_deleted(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "source", tmp_path / "processed"
+    source.mkdir()
+    document = source / "gone.txt"
+    document.write_text("old content", encoding="utf-8")
+    assert process_directory(source, output)["processed"] == 1
+    document.unlink()
+    process_directory(source, output)
+    assert not (output / "gone.txt").exists()
+    assert not (output / "gone.json").exists()
