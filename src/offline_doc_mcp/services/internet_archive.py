@@ -30,7 +30,7 @@ def _is_public_domain(metadata: dict) -> bool:
         and parsed.path.rstrip("/").lower() in _ALLOWED_LICENSE_PATHS
     )
     # Free-form rights text is not reliable enough for substring checks.
-    rights = re.sub(r"\\s+", " ", str(metadata.get("rights") or "").strip().lower())
+    rights = re.sub(r"\s+", " ", str(metadata.get("rights") or "").strip().lower())
     exact_rights = rights in {"public domain", "public domain mark 1.0", "cc0"}
     return canonical_license or exact_rights
 
