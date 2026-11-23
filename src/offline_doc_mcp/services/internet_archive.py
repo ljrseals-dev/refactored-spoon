@@ -19,21 +19,23 @@ _ALLOWED_LICENSE_PATHS = {
 
 def _is_public_domain(metadata: dict) -> bool:
     license_url = str(metadata.get("licenseurl") or "").strip()
-    parsed = urlparse(license_url)
-    canonical_license = (
-        parsed.scheme == "https"
-        and parsed.hostname == "creativecommons.org"
-        and parsed.port in (None, 443)
-        and not parsed.query and not parsed.fragment
-        and parsed.username is None
-        and parsed.password is None
-        and parsed.path.rstrip("/").lower() in _ALLOWED_LICENSE_PATHS
-    )
+    try:
+        parsed = urlparse(license_url)
+        canonical_license = (
+            parsed.scheme == "https"
+            and parsed.hostname == "creativecommons.org"
+            and parsed.port in (None, 443)
+            and not parsed.query and not parsed.fragment
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path.rstrip("/").lower() in _ALLOWED_LICENSE_PATHS
+        )
+    except ValueError:
+        return False
     # Free-form rights text is not reliable enough for substring checks.
     rights = re.sub(r"\s+", " ", str(metadata.get("rights") or "").strip().lower())
     exact_rights = rights in {"public domain", "public domain mark 1.0", "cc0"}
     return canonical_license or exact_rights
-
 
 class InternetArchiveService(BaseService):
     def acquire(self, force: bool = False) -> int:
