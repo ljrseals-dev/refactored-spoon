@@ -175,7 +175,7 @@ class RobotsAwareHTTP:
                 continue
             response.raise_for_status()
             return response
-        raise RuntimeError("Source request retry budget exhausted"
+        raise RuntimeError("Source request retry budget exhausted")
 
     def download(
         self, url: str, destination: Path, *, max_bytes: int = 25_000_000
