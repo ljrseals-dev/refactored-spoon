@@ -61,6 +61,10 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
             target.parent.mkdir(parents=True, exist_ok=True)
             content = extract_text(path)
             if not content.strip():
+                # Remove an older extraction if the source now contains no text,
+                # so it cannot be silently indexed as current content.
+                target.unlink(missing_ok=True)
+                target.with_suffix(".json").unlink(missing_ok=True)
                 skipped += 1
                 continue
             temporary = target.with_suffix(target.suffix + ".tmp")
