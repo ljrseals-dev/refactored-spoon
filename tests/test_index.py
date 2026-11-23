@@ -94,8 +94,13 @@ def test_directory_processing_extracts_text_and_html(tmp_path):
     result = process_directory(source, output)
     assert result == {"processed": 2, "skipped": 0, "errors": 0}
     assert (output / "plain.txt").read_text().strip() == "Text content"
-    assert "HTML content" in (output / "page.txt").read_text()
+    assert "HTML content" in (output / "page.html.txt").read_text()
     assert (output / "plain.json").exists()
+    (source / "book.pdf").write_bytes(b"not a pdf")
+    (source / "book.docx").write_bytes(b"not a docx")
+    collision_result = process_directory(source, output)
+    assert (output / "book.pdf.txt").exists() is False
+    assert collision_result["errors"] == 2
 
 
 def test_processing_skips_bad_file_and_continues(tmp_path):
