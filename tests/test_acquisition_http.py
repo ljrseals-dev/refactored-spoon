@@ -75,6 +75,8 @@ def test_internet_archive_requires_public_domain_or_cc0_license():
     assert not _is_public_domain({"licenseurl": "http://creativecommons.org/publicdomain/zero/1.0"})
     assert not _is_public_domain({"rights": "Public domain status has not been verified"})
     assert not _is_public_domain({"rights": "copyright public domain text"})
+    assert _is_public_domain({"rights": "Public\\tDomain"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org:8443/publicdomain/zero/1.0/"})
 
 
 def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
