@@ -126,12 +126,21 @@ class Engine:
                 evidence=evidence, sources=sources, classical=True,
             )
 
+        # RAG grounding contract: answers must be grounded in retrieved
+        # passages, cite numbered markers, and acknowledge missing context.
+        rag_system = (
+            mode_spec.system_addendum
+            + "\\n\\nRAG grounding requirements: Use retrieved context only. "
+            "Cite supporting passages using their bracketed numbers (for example [1]). "
+            "Never invent citations or unsupported facts. If context is absent or "
+            "insufficient, state what is missing and ask for source material."
+        )
         user = (
-            f"Question: {question}\n\nContext:\n"
-            f"{_format_passages(passages) or '(none)'}"
+            f"Question: {question}\\n\\nRetrieved context (numbered source passages):\\n"
+            f"{_format_passages(passages) or '(no passages retrieved)'}"
         )
         try:
-            raw = provider.complete(mode_spec.system_addendum, user)
+            raw = provider.complete(rag_system, user)
         except Exception as exc:
             return Answer(
                 question=question, mode=mode_name,
