@@ -132,7 +132,7 @@ class ResumableDownloader:
             if not force:
                 raise RuntimeError("Download previously failed permanently; use force to retry")
             self.state.update(doc_id, state="pending", last_error=None, attempt_count=0)
-        if destination.exists() and (row["state"] != "completed"):
+        if destination.exists() and (row["state"] != "completed") and not force:
             destination.unlink()
         partial.parent.mkdir(parents=True, exist_ok=True)
         for attempt in range(self.retry_max + 1):
