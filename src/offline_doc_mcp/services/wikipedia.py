@@ -15,6 +15,12 @@ import httpx
 from .base import BaseService
 
 
+def _article_output_name(title: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)[:80].strip("._") or "article"
+    suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:12]
+    return f"{safe}-{suffix}.txt"
+
+
 class WikipediaService(BaseService):
     def acquire(self, force: bool = False) -> int:
         out = self.ensure_output_dir()
@@ -52,9 +58,7 @@ class WikipediaService(BaseService):
                 extract = str(summary.get("extract") or "").strip()
                 if len(extract) < 200:
                     continue
-                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", title)[:80].strip("._") or "article"
-                suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:12]
-                destination = out / f"{safe}-{suffix}.txt"
+                destination = out / _article_output_name(title)
                 if destination.exists() and not force:
                     continue
                 page_url = summary.get("content_urls", {}).get("desktop", {}).get("page", "")
