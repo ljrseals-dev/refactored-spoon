@@ -16,9 +16,13 @@ NO_RULE_QUESTION = "zzqx unmatched gibberish question 12345"
 class RecordingProvider:
     def __init__(self):
         self.calls = 0
+        self.system = ""
+        self.user = ""
 
     def complete(self, system: str, user: str) -> str:
         self.calls += 1
+        self.system = system
+        self.user = user
         return "fake answer from provider"
 
 
@@ -43,3 +47,16 @@ def test_provider_modes_call_provider(mode):
     answer = Engine(provider=provider).ask(NO_RULE_QUESTION, mode=mode)
     assert provider.calls == 1
     assert answer.classical is False
+
+
+def test_provider_rag_prompt_requires_citations_and_uses_retrieved_context():
+    provider = RecordingProvider()
+    passages = [{"title": "Source A", "path": "source-a.txt", "doc_id": 7,
+                "chunk_index": 0, "content": "The source states RAG is retrieval augmented generation."}]
+    answer = Engine(provider=provider, archive_search=lambda _q: passages).ask("What is RAG?", mode="RESEARCH")
+    assert provider.calls == 1
+    assert "retrieved context only" in provider.system.lower()
+    assert "bracketed numbers" in provider.system.lower()
+    assert "[1] Source: Source A" in provider.user
+    assert passages[0]["content"] in provider.user
+    assert answer.evidence and answer.evidence[0]["title"] == "Source A"
