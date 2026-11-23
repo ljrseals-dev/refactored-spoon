@@ -96,3 +96,26 @@ def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
         assert sleeps and sleeps[-1] >= 2.0
     finally:
         client.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://localhost/private",
+        "https://service.local/private",
+        "https://service.internal/private",
+        "https://127.0.0.1/private",
+        "https://10.0.0.2/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://[::1]/private",
+    ],
+)
+def test_source_urls_reject_local_and_non_public_hosts(url):
+    client = RobotsAwareHTTP("RefactoredSpoonBot/0.2", min_delay=0, client=client_for(
+        lambda request: httpx.Response(200, text="User-agent: *\\nAllow: /")
+    ))
+    try:
+        with pytest.raises(ValueError, match="Local|Non-public"):
+            client._origin(url)
+    finally:
+        client.close()
