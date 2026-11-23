@@ -8,13 +8,12 @@ services:
     type: bulk_catalog
     description: "Project Gutenberg public-domain books"
     base_url: "https://www.gutenberg.org"
-    # Existing catalog / mirror links left intact – edit only if needed
     catalog_url: "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
     mirrors:
       - "https://www.gutenberg.org"
       - "https://gutenberg.pglaf.org"
     license_filter: ["public domain", "Public domain", "CC0"]
-    max_books: 500          # safety limit for first run
+    max_books: 500
     max_book_bytes: 25000000
     public_domain_jurisdiction: "US"
     language: "en"
@@ -29,13 +28,10 @@ services:
     enabled: true
     type: dump
     description: "Wikipedia / Wikimedia dumps (CC BY-SA)"
-    # Official dump index – leave as-is
     dump_index: "https://dumps.wikimedia.org/backup-index.html"
     languages:
       - en
-      # - es
-      # - fr
-    dump_type: "pages-articles"   # or pages-articles-multistream
+    dump_type: "pages-articles"
     output_dir: "data/wikipedia"
     max_pages: 20
     request_delay_seconds: 1.0
@@ -47,7 +43,6 @@ services:
     enabled: true
     type: ia_search
     description: "Internet Archive public-domain / CC0 items"
-    # Advanced search – keep existing query structure
     base_url: "https://archive.org"
     query: 'collection:opensource AND (publicdomain OR mediatype:texts) AND licenseurl:(*cc0* OR *publicdomain*)'
     max_items: 200
@@ -59,20 +54,10 @@ services:
     formats: ["pdf", "epub", "txt"]
     parser: "generic"
 
-  # Example of adding another legal service later:
-  # openstax:
-  #   enabled: false
-  #   type: html
-  #   description: "OpenStax open textbooks (CC BY)"
-  #   base_url: "https://openstax.org"
-  #   output_dir: "data/openstax"
-  #   parser: "html"
-
-# Global processing defaults
+# Global processing defaults. Values are consumed by the index command.
 processing:
   chunk_size: 1200
   chunk_overlap: 150
   min_chunk_chars: 200
-  languages: ["en"]          # filter after language detection
-  output_chunks_dir: "data/chunks"
+  processed_dir: "data/processed"
   index_db: "data/index.db"

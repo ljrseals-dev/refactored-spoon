@@ -1,4 +1,4 @@
-"""Regression tests for provider isolation (adapted from original patch)."""
+"""Regression tests for provider isolation and RAG grounding."""
 
 from __future__ import annotations
 
@@ -16,9 +16,13 @@ NO_RULE_QUESTION = "zzqx unmatched gibberish question 12345"
 class RecordingProvider:
     def __init__(self):
         self.calls = 0
+        self.system = ""
+        self.user = ""
 
     def complete(self, system: str, user: str) -> str:
         self.calls += 1
+        self.system = system
+        self.user = user
         return "fake answer from provider"
 
 
@@ -38,8 +42,33 @@ def test_offline_modes_never_call_injected_provider(mode):
 
 
 @pytest.mark.parametrize("mode", PROVIDER_MODES)
-def test_provider_modes_call_provider(mode):
+def test_provider_modes_call_provider_with_context(mode):
     provider = RecordingProvider()
-    answer = Engine(provider=provider).ask(NO_RULE_QUESTION, mode=mode)
+    source = [{"title": "Grounding", "path": "grounding.txt", "doc_id": 1,
+               "chunk_index": 0, "content": "A source passage for this test."}]
+    answer = Engine(provider=provider, archive_search=lambda _q: source).ask(NO_RULE_QUESTION, mode=mode)
     assert provider.calls == 1
     assert answer.classical is False
+
+
+@pytest.mark.parametrize("mode", PROVIDER_MODES)
+def test_provider_modes_fail_closed_without_retrieved_context(mode):
+    provider = RecordingProvider()
+    answer = Engine(provider=provider).ask(NO_RULE_QUESTION, mode=mode)
+    assert provider.calls == 0
+    assert answer.classical is True
+    assert answer.error == "no_retrieved_context"
+    assert "No relevant source passages" in answer.answer
+
+
+def test_provider_rag_prompt_requires_citations_and_uses_retrieved_context():
+    provider = RecordingProvider()
+    passages = [{"title": "Source A", "path": "source-a.txt", "doc_id": 7,
+                "chunk_index": 0, "content": "The source states RAG is retrieval augmented generation."}]
+    answer = Engine(provider=provider, archive_search=lambda _q: passages).ask("What is RAG?", mode="RESEARCH")
+    assert provider.calls == 1
+    assert "retrieved context only" in provider.system.lower()
+    assert "bracketed numbers" in provider.system.lower()
+    assert "[1] Source: Source A" in provider.user
+    assert passages[0]["content"] in provider.user
+    assert answer.evidence and answer.evidence[0]["title"] == "Source A"

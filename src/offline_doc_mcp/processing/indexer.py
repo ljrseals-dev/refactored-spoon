@@ -52,9 +52,10 @@ class LocalIndex:
     def add_document(
         self, path: Path, text: str, title: str | None = None,
         source: str = "local", chunk_size: int = 1200, overlap: int = 150,
+        min_chars: int = 200,
     ) -> int:
         title = title or path.stem
-        chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+        chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap, min_chars=min_chars)
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO documents(path,title,source) VALUES(?,?,?)
@@ -76,6 +77,25 @@ class LocalIndex:
                     (doc_id, i, chunk, title, str(path)),
                 )
         return len(chunks)
+
+    def remove_documents(self, paths: list[str]) -> int:
+        """Remove document rows and their FTS passages in one transaction."""
+        if not paths:
+            return 0
+        removed = 0
+        # Bound each statement to avoid SQLite variable-limit failures for
+        # directories containing large numbers of stale documents.
+        with self._connect() as conn:
+            for start in range(0, len(paths), 500):
+                batch = paths[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id FROM documents WHERE path IN ({placeholders})", batch
+                ).fetchall()
+                conn.execute(f"DELETE FROM chunks WHERE path IN ({placeholders})", batch)
+                conn.execute(f"DELETE FROM documents WHERE path IN ({placeholders})", batch)
+                removed += len(rows)
+        return removed
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         safe_query = fts_query(query)
@@ -113,12 +133,37 @@ class LocalIndex:
 
 def build_index_from_dir(
     data_root: Path, db_path: Path, chunk_size: int = 1200, overlap: int = 150,
+    min_chars: int = 200,
 ) -> LocalIndex:
     idx = LocalIndex(db_path)
+    if not data_root.is_dir():
+        return idx
+    seen_paths: set[str] = set()
     for txt in iter_text_files(data_root):
+        seen_paths.add(str(txt))
         try:
             content = txt.read_text(encoding="utf-8", errors="replace")
-            idx.add_document(txt, content, title=txt.stem, source=str(txt))
+            idx.add_document(
+                txt, content, title=txt.stem, source=str(txt),
+                chunk_size=chunk_size, overlap=overlap, min_chars=min_chars,
+            )
         except (OSError, UnicodeError, ValueError) as exc:
             print(f"[index] skip {txt}: {type(exc).__name__}")
+
+    # Reconcile only records belonging to this input tree. If the directory is
+    # missing, above returns without pruning; unreadable files remain protected
+    # because their paths were recorded before reading.
+    root = data_root.resolve()
+    with idx._connect() as conn:
+        indexed_paths = [row[0] for row in conn.execute("SELECT path FROM documents")]
+    stale: list[str] = []
+    for stored in indexed_paths:
+        try:
+            candidate = Path(stored).resolve()
+            if candidate == root or root in candidate.parents:
+                if stored not in seen_paths:
+                    stale.append(stored)
+        except (OSError, RuntimeError):
+            continue
+    idx.remove_documents(stale)
     return idx

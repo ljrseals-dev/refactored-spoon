@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from offline_doc_mcp.processing.indexer import LocalIndex, fts_query
+from offline_doc_mcp.processing.indexer import LocalIndex, fts_query, build_index_from_dir
 from offline_doc_mcp.processing.chunker import chunk_text
 
 
@@ -31,7 +31,7 @@ def test_indexing_same_path_replaces_old_chunks(tmp_path):
 def test_search_rejects_fts_operator_injection_and_bounds_limit(tmp_path):
     index = LocalIndex(tmp_path / "index.db")
     index.add_document(Path("a.txt"), "navigation " * 100)
-    assert index.search('"broken', limit=5000) == [] or index.search('"broken', limit=5000) == []
+    assert index.search('"broken', limit=5000) == []
     assert len(index.search("navigation", limit=5000)) <= 50
 
 
@@ -39,3 +39,109 @@ def test_search_rejects_fts_operator_injection_and_bounds_limit(tmp_path):
 def test_chunker_validates_window(chunk_size, overlap):
     with pytest.raises(ValueError):
         chunk_text("x" * 500, chunk_size=chunk_size, overlap=overlap)
+
+
+def test_chunker_rejects_minimum_larger_than_window():
+    with pytest.raises(ValueError):
+        chunk_text("x" * 500, chunk_size=100, overlap=10, min_chars=101)
+
+
+def test_indexing_uses_requested_chunk_parameters(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    source = root / "a.txt"
+    source.write_text("word " * 400, encoding="utf-8")
+    index = build_index_from_dir(root, tmp_path / "db.sqlite", chunk_size=300, overlap=50, min_chars=50)
+    chunks = index.search("word", limit=50)
+    assert chunks
+    assert all(len(chunk["content"]) <= 300 for chunk in chunks)
+
+
+def test_index_refresh_removes_deleted_files_without_touching_outside_root(tmp_path):
+    root = tmp_path / "data"
+    root.mkdir()
+    keep = root / "keep.txt"
+    removed = root / "removed.txt"
+    outside = tmp_path / "outside.txt"
+    keep.write_text("keepword " * 100, encoding="utf-8")
+    removed.write_text("goneword " * 100, encoding="utf-8")
+    outside.write_text("outsideword " * 100, encoding="utf-8")
+    index = LocalIndex(tmp_path / "db.sqlite")
+    index.add_document(keep, keep.read_text(), chunk_size=100, overlap=10, min_chars=10)
+    index.add_document(removed, removed.read_text(), chunk_size=100, overlap=10, min_chars=10)
+    index.add_document(outside, outside.read_text(), chunk_size=100, overlap=10, min_chars=10)
+    removed.unlink()
+    refreshed = build_index_from_dir(root, tmp_path / "db.sqlite", chunk_size=100, overlap=10, min_chars=10)
+    assert refreshed.search("keepword")
+    assert not refreshed.search("goneword")
+    assert refreshed.search("outsideword")
+
+
+def test_missing_source_directory_does_not_prune_index(tmp_path):
+    index = LocalIndex(tmp_path / "db.sqlite")
+    index.add_document(tmp_path / "data/a.txt", "preserve " * 100)
+    refreshed = build_index_from_dir(tmp_path / "missing", tmp_path / "db.sqlite")
+    assert refreshed.search("preserve")
+
+
+def test_directory_processing_extracts_text_and_html(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source = tmp_path / "source"
+    output = tmp_path / "processed"
+    source.mkdir()
+    (source / "plain.txt").write_text("Text content", encoding="utf-8")
+    (source / "page.html").write_text("<title>Heading</title><p>HTML content</p>", encoding="utf-8")
+    (source / "page.txt").write_text("plain page text", encoding="utf-8")
+    result = process_directory(source, output)
+    assert result == {"processed": 3, "skipped": 0, "errors": 0}
+    assert (output / "plain.txt").read_text().strip() == "Text content"
+    assert "HTML content" in (output / "page.html.txt").read_text()
+    assert (output / "page.txt").read_text().strip() == "plain page text"
+    assert (output / "plain.json").exists()
+    (source / "book.pdf").write_bytes(b"not a pdf")
+    (source / "book.docx").write_bytes(b"not a docx")
+    collision_result = process_directory(source, output)
+    assert (output / "book.pdf.txt").exists() is False
+    assert collision_result["errors"] == 2
+
+
+def test_processing_skips_bad_file_and_continues(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "input", tmp_path / "output"
+    source.mkdir()
+    (source / "broken.pdf").write_bytes(b"not a pdf")
+    (source / "good.txt").write_text("valid content", encoding="utf-8")
+    result = process_directory(source, output)
+    assert result == {"processed": 1, "skipped": 0, "errors": 1}
+    assert (output / "good.txt").read_text().strip() == "valid content"
+
+
+
+
+def test_processing_removes_generated_output_when_source_is_deleted(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "source", tmp_path / "processed"
+    source.mkdir()
+    document = source / "gone.txt"
+    document.write_text("old content", encoding="utf-8")
+    assert process_directory(source, output)["processed"] == 1
+    document.unlink()
+    process_directory(source, output)
+    assert not (output / "gone.txt").exists()
+    assert not (output / "gone.json").exists()
+
+
+
+
+def test_processing_clears_stale_text_when_source_becomes_empty(tmp_path):
+    from offline_doc_mcp.processing.processor import process_directory
+    source, output = tmp_path / "source", tmp_path / "processed"
+    source.mkdir()
+    file = source / "emptying.txt"
+    file.write_text("non-empty original", encoding="utf-8")
+    process_directory(source, output)
+    file.write_text("   ", encoding="utf-8")
+    result = process_directory(source, output)
+    assert result["skipped"] == 1
+    assert not (output / "emptying.txt").exists()
+    assert not (output / "emptying.json").exists()
