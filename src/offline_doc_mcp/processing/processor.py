@@ -49,6 +49,7 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
         return {"processed": 0, "skipped": 0, "errors": 0}
     processed = skipped = errors = 0
     output_resolved = output_dir.resolve()
+    seen_sources: set[str] = set()
     for path in source_dir.rglob("*"):
         if path.is_symlink() or not path.is_file() or path.suffix.lower() not in SUPPORTED:
             continue
@@ -56,6 +57,7 @@ def process_directory(source_dir: Path, output_dir: Path) -> dict[str, int]:
             if output_resolved == path.resolve() or output_resolved in path.resolve().parents:
                 continue
             rel = path.relative_to(source_dir)
+            seen_sources.add(str(rel))
             target_name = rel if path.suffix.lower() == ".txt" else rel.with_suffix(rel.suffix.lower() + ".txt")
             target = output_dir / target_name
             target.parent.mkdir(parents=True, exist_ok=True)
