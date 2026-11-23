@@ -135,3 +135,46 @@ def test_downloader_checks_robots_on_redirect_target(tmp_path):
         assert not destination.exists()
     finally:
         http.close()
+
+
+def test_force_redownloads_completed_download_and_replaces_content(tmp_path):
+    payload = {"value": b"old document content " * 20}
+    hits = {"download": 0}
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\\nAllow: /\\n")
+        hits["download"] += 1
+        return httpx.Response(200, content=payload["value"])
+
+    http = make_http(handler)
+    state = DownloadState(tmp_path / "state.db")
+    downloader = ResumableDownloader(http, state, tmp_path / "quarantine")
+    destination = tmp_path / "document.txt"
+    try:
+        downloader.download("fixture", "https://example.org/doc.txt", destination)
+        assert destination.read_bytes() == payload["value"]
+        payload["value"] = b"fresh replacement content " * 20
+        downloader.download("fixture", "https://example.org/doc.txt", destination, force=True)
+        assert hits["download"] == 2
+        assert destination.read_bytes() == payload["value"]
+        row = state.get(next(iter(state.connect().execute("SELECT doc_id FROM downloads")))[0])
+        assert row["state"] == "completed"
+        assert row["attempt_count"] == 0
+    finally:
+        http.close()
+        STOP_REQUESTED.clear()
+
+
+def test_store_content_force_refreshes_completed_record(tmp_path):
+    state = DownloadState(tmp_path / "state.db")
+    downloader = ResumableDownloader(object(), state, tmp_path / "quarantine")
+    destination = tmp_path / "stored.txt"
+    old = b"old extract content " * 20
+    new = b"updated extract content " * 20
+    downloader.store_content("wiki", "https://example.org/page", destination, old)
+    assert destination.read_bytes() == old
+    downloader.store_content("wiki", "https://example.org/page", destination, new, force=True)
+    assert destination.read_bytes() == new
+    row = state.get(next(iter(state.connect().execute("SELECT doc_id FROM downloads")))[0])
+    assert row["state"] == "completed"
