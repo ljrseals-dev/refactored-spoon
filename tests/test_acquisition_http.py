@@ -69,6 +69,12 @@ def test_internet_archive_requires_public_domain_or_cc0_license():
     assert _is_public_domain({"rights": "Public domain"})
     assert not _is_public_domain({"licenseurl": "https://creativecommons.org/licenses/by/4.0/"})
     assert not _is_public_domain({})
+    assert _is_public_domain({"licenseurl": "https://creativecommons.org/publicdomain/mark/1.0/"})
+    assert not _is_public_domain({"licenseurl": "https://creativecommons.org/publicdomain/zero/1.0.evil"})
+    assert not _is_public_domain({"licenseurl": "https://fakecreativecommons.org/publicdomain/zero/1.0"})
+    assert not _is_public_domain({"licenseurl": "http://creativecommons.org/publicdomain/zero/1.0"})
+    assert not _is_public_domain({"rights": "Public domain status has not been verified"})
+    assert not _is_public_domain({"rights": "copyright public domain text"})
 
 
 def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
