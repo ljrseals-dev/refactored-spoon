@@ -130,13 +130,13 @@ class Engine:
         # passages, cite numbered markers, and acknowledge missing context.
         rag_system = (
             mode_spec.system_addendum
-            + "\\n\\nRAG grounding requirements: Use retrieved context only. "
+            + "\n\nRAG grounding requirements: Use retrieved context only. "
             "Cite supporting passages using their bracketed numbers (for example [1]). "
             "Never invent citations or unsupported facts. If context is absent or "
             "insufficient, state what is missing and ask for source material."
         )
         user = (
-            f"Question: {question}\\n\\nRetrieved context (numbered source passages):\\n"
+            f"Question: {question}\n\nRetrieved context (numbered source passages):\n"
             f"{_format_passages(passages) or '(no passages retrieved)'}"
         )
         try:
