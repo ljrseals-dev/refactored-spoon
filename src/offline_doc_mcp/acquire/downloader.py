@@ -114,7 +114,16 @@ class ResumableDownloader:
                                 expected_size=expected_size, expected_sha256=expected_sha256)
         if row["state"] == "quarantined":
             raise DownloadValidationError("This source is quarantined; manual review required")
-        if row["state"] == "completed" and destination.exists():
+        if force:
+            # Force means a fresh fetch, not merely retrying a failed state.
+            partial.unlink(missing_ok=True)
+            self.state.update(
+                doc_id, state="pending", bytes_done=0, etag=None,
+                last_modified=None, attempt_count=0, last_error=None,
+                next_retry_at=None, completed_at=None,
+            )
+            row = self.state.get(doc_id) or row
+        if row["state"] == "completed" and destination.exists() and not force:
             issues = validate_file(destination, expected_size=expected_size,
                                    expected_sha256=expected_sha256)
             if not issues:
@@ -279,7 +288,7 @@ class ResumableDownloader:
                 time.sleep(min(30, 2 ** attempt) * (0.5 + random.random()))
         raise RuntimeError("Download retry budget exhausted")
 
-    def store_content(self, source: str, url: str, destination: Path, content: bytes) -> int:
+    def store_content(self, source: str, url: str, destination: Path, content: bytes, *, force: bool = False) -> int:
         """Atomically persist source-derived text using the download state table."""
         identity = hashlib.sha256(f"{source}\0{url}".encode()).hexdigest()
         doc_id = f"{source[:24]}-{identity[:32]}"
@@ -291,9 +300,18 @@ class ResumableDownloader:
                                 expected_size=len(content), expected_sha256=digest)
         if row["state"] == "quarantined":
             raise DownloadValidationError("This source is quarantined; manual review required")
-        if row["state"] == "completed" and destination.exists():
+        if row["state"] == "quarantined":
+            raise DownloadValidationError("This source is quarantined; manual review required")
+        if row["state"] == "completed" and destination.exists() and not force:
             if not validate_file(destination, expected_size=len(content), expected_sha256=digest):
                 return destination.stat().st_size
+        if force:
+            self.state.update(
+                doc_id, state="pending", bytes_done=0, etag=None,
+                last_modified=None, attempt_count=0, last_error=None,
+                next_retry_at=None, completed_at=None,
+            )
+            partial.unlink(missing_ok=True)
         with partial.open("wb") as stream:
             stream.write(content)
             stream.flush()
