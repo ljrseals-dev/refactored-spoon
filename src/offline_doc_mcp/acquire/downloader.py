@@ -203,6 +203,8 @@ class ResumableDownloader:
                                 pass
                             self.state.update(doc_id, bytes_done=0, etag=None, last_modified=None)
                             raise _RestartDownload("Content-Range mismatch; restarting from byte zero")
+                        if expected_size is None:
+                            expected_size = range_total
                     elif response.status_code != 200:
                         raise DownloadValidationError(f"Unexpected initial response: HTTP {response.status_code}")
                     length = response.headers.get("content-length")
