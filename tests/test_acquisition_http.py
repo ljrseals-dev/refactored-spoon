@@ -112,6 +112,8 @@ def test_robots_crawl_delay_and_request_rate_are_honored(monkeypatch):
         "https://10.0.0.2/private",
         "https://169.254.169.254/latest/meta-data",
         "https://[::1]/private",
+        "https://2130706433/private",
+        "https://127.1/private",
     ],
 )
 def test_source_urls_reject_local_and_non_public_hosts(url):
