@@ -36,7 +36,9 @@ class RobotsAwareHTTP:
             raise ValueError("A descriptive, single-line User-Agent is required")
         if timeout <= 0 or min_delay < 0 or not 0 <= max_retries <= 5:
             raise ValueError("Invalid HTTP timeout, delay, or retry count")
-        if contact and any(ch in contact for ch in ("\r", "\n")):\n            raise ValueError("Crawler contact must be a single line")\n        suffix = f" (contact: {contact})" if contact else ""
+        if contact and any(ch in contact for ch in ("\r", "\n")):
+            raise ValueError("Crawler contact must be a single line")
+        suffix = f" (contact: {contact})" if contact else ""
         self.user_agent = user_agent + suffix
         self.timeout = timeout
         self.min_delay = min_delay
